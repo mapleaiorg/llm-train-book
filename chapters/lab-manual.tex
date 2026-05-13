@@ -1,0 +1,527 @@
+\chapter{Hands-on Lab Manual}
+
+This chapter turns the textbook into a working course. The labs are ordered so a student can begin with ordinary tensors on a laptop, then progress toward real GPT21 training, backend comparison, fine-tuning, and local inference export. The goal is not to run the largest model. The goal is to build the complete mental model of an LLM training system: text becomes token IDs, token IDs become tensors, tensors move through a GPT, loss becomes gradients, gradients update weights, checkpoints preserve state, and exported model files serve inference.
+
+\section{How to Use the Labs}
+
+Each lab has four parts:
+
+\begin{itemize}
+  \item \term{Goal}: the concept or engineering habit being practiced.
+  \item \term{Procedure}: the concrete work to perform.
+  \item \term{Acceptance test}: evidence that the lab worked.
+  \item \term{Solution sketch}: the reasoning students should be able to explain.
+\end{itemize}
+
+The labs are intentionally small. A tiny model that trains correctly is more educational than a large model that fails silently. When hardware is limited, use CPU smoke tests and very small configurations first. When GPUs are available, increase batch size, context length, and model width gradually.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.95\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\small,
+  box/.style={draw, rounded corners=2pt, align=center, minimum width=3.1cm, minimum height=0.9cm, fill=blue!7},
+  capbox/.style={draw, rounded corners=2pt, align=center, minimum width=3.1cm, minimum height=0.9cm, fill=orange!12},
+  arrow/.style={-{Latex[length=3mm]}, thick}
+]
+\node[box] (env) at (0,0) {Lab 1\\Environment};
+\node[box] (data) at (3.6,0) {Labs 2--4\\Tokenizer + data};
+\node[box] (tensor) at (7.2,0) {Labs 5--8\\Tensors + loss};
+\node[box] (model) at (10.8,0) {Labs 9--11\\Training run};
+
+\node[box] (eval) at (10.8,-1.8) {Labs 12--14\\Checkpoints + sampling};
+\node[box] (backend) at (7.2,-1.8) {Labs 15--17\\Backend comparison};
+\node[box] (fine) at (3.6,-1.8) {Lab 18\\Fine-tuning};
+\node[box] (gguf) at (0,-1.8) {Lab 19\\GGUF export};
+
+\node[capbox] (capstone) at (0,-3.6) {Lab 20\\Capstone report};
+
+\draw[arrow] (env) -- (data);
+\draw[arrow] (data) -- (tensor);
+\draw[arrow] (tensor) -- (model);
+\draw[arrow] (model) -- (eval);
+\draw[arrow] (eval) -- (backend);
+\draw[arrow] (backend) -- (fine);
+\draw[arrow] (fine) -- (gguf);
+\draw[arrow] (gguf) -- (capstone);
+\end{tikzpicture}}
+\caption{The lab sequence follows the same life cycle as a real LLM project: environment, data, tensors, model, training, artifacts, backend comparison, fine-tuning, export, and final report.}
+\label{fig:lab-sequence}
+\end{figure}
+\clearpage
+
+\section{Lab 1: Environment and Reproducibility Check}
+
+\term{Goal.} Verify Python, PyTorch, Rust, CUDA tools, and repository layout before running any model.
+
+\term{Procedure.}
+
+\begin{lstlisting}
+python --version
+python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
+rustc --version
+cargo --version
+nvcc --version
+git status --short
+\end{lstlisting}
+
+\term{Acceptance test.}
+
+\begin{itemize}
+  \item Python runs.
+  \item PyTorch imports.
+  \item Rust and Cargo run if the Candle path is being tested.
+  \item CUDA may be unavailable on a laptop, but the result is recorded honestly.
+  \item The repository state is documented before experiments begin.
+\end{itemize}
+
+\term{Solution sketch.} Good training work begins with a known environment. If a result cannot be reproduced, it cannot teach much. Record versions, device availability, command line, config file, and git state.
+
+\section{Lab 2: Tokenizer Round Trip}
+
+\term{Goal.} Confirm that text can be encoded into token IDs and decoded back into text.
+
+\term{Procedure.}
+
+\begin{lstlisting}[language=Python]
+text = "MapleAI trains tiny GPT models before large ones."
+ids = tokenizer.encode(text)
+decoded = tokenizer.decode(ids)
+print(ids)
+print(decoded)
+\end{lstlisting}
+
+\term{Acceptance test.}
+
+\begin{itemize}
+  \item The token list is nonempty.
+  \item Decoding reproduces the original text or the expected normalized form.
+  \item Students can identify whether spaces are represented inside tokens.
+\end{itemize}
+
+\term{Solution sketch.} A GPT never reads raw strings. It reads token IDs. If tokenizer round trip is broken, the model is being trained on a corrupted language interface.
+
+\section{Lab 3: Build a Token Binary File}
+
+\term{Goal.} Understand the \texttt{.bin} token stream used by training backends.
+
+\term{Procedure.}
+
+Create a short text file, tokenize it, and write token IDs as little-endian integers. Then inspect the first values.
+
+\begin{lstlisting}
+python scripts/inspect_bin.py data/tokens/wikitext103/train.bin \
+  --dtype uint16 \
+  --count 32
+\end{lstlisting}
+
+\term{Acceptance test.}
+
+\begin{itemize}
+  \item The file length is divisible by the token dtype size.
+  \item The first IDs are within vocabulary range.
+  \item Train and validation files are separate.
+\end{itemize}
+
+\term{Solution sketch.} The \texttt{.bin} file is not a model. It is a contiguous token dataset. PyTorch, Candle, and llm.c can all read the same logical stream if they agree on dtype, endianness, vocabulary, and split metadata.
+
+\section{Lab 4: Dataset Shift}
+
+\term{Goal.} Construct input and target tensors for next-token prediction.
+
+\term{Procedure.}
+
+\begin{lstlisting}[language=Python]
+tokens = [5, 8, 13, 21, 34, 55]
+x = tokens[0:4]
+y = tokens[1:5]
+print("x =", x)
+print("y =", y)
+\end{lstlisting}
+
+\term{Acceptance test.} Each target position is the next token after the matching input position.
+
+\[
+\begin{array}{c|cccc}
+\text{input } x & 5 & 8 & 13 & 21\\
+\hline
+\text{target } y & 8 & 13 & 21 & 34
+\end{array}
+\]
+
+\term{Solution sketch.} GPT training is a sequence of classification problems. At each position, the class label is the next token ID.
+
+\section{Lab 5: Embedding Lookup}
+
+\term{Goal.} Turn token IDs into vectors.
+
+\term{Procedure.}
+
+\begin{lstlisting}[language=Python]
+import torch
+B, T, V, C = 2, 4, 32, 8
+x = torch.randint(0, V, (B, T))
+emb = torch.nn.Embedding(V, C)
+X = emb(x)
+print(x.shape, X.shape)
+\end{lstlisting}
+
+\term{Acceptance test.} Shape \(\shape{[2,4]}\) becomes \(\shape{[2,4,8]}\).
+
+\term{Solution sketch.} Token IDs are indices. Embedding lookup replaces each integer with a learned vector. The batch and time dimensions stay in place; a channel dimension is added.
+
+\section{Lab 6: Causal Mask}
+
+\term{Goal.} Build the lower-triangular attention mask and explain future-token blocking.
+
+\term{Procedure.}
+
+\begin{lstlisting}[language=Python]
+import torch
+T = 6
+mask = torch.tril(torch.ones(T, T))
+print(mask)
+\end{lstlisting}
+
+\term{Acceptance test.} Entries above the diagonal are zero or blocked. Position 2 cannot attend to positions 3, 4, or 5 if indexing starts at 0.
+
+\term{Solution sketch.} The mask enforces the autoregressive rule. During training, the model sees many positions in parallel, but the mask prevents cheating by reading the future.
+
+\section{Lab 7: Cross-Entropy Loss}
+
+\term{Goal.} Compute loss from logits and targets.
+
+\term{Procedure.}
+
+\begin{lstlisting}[language=Python]
+import torch
+import torch.nn.functional as F
+B, T, V = 2, 3, 10
+logits = torch.randn(B, T, V)
+targets = torch.randint(0, V, (B, T))
+loss = F.cross_entropy(logits.reshape(B*T, V), targets.reshape(B*T))
+print(loss)
+\end{lstlisting}
+
+\term{Acceptance test.} The loss is a scalar and gradients can flow through \texttt{logits}.
+
+\term{Solution sketch.} Cross entropy expects one row of class scores per training item. Flattening \(\shape{[B,T,V]}\) into \(\shape{[B T,V]}\) treats every token position as one classification item.
+
+\section{Lab 8: One Transformer Block Shape Test}
+
+\term{Goal.} Verify that a Transformer block preserves \(\shape{[B,T,C]}\).
+
+\term{Procedure.}
+
+\begin{lstlisting}
+input:  [B, T, C]
+attention output: [B, T, C]
+MLP output:       [B, T, C]
+block output:     [B, T, C]
+\end{lstlisting}
+
+Instrument the model with shape prints or assertions.
+
+\term{Acceptance test.} Attention and MLP change values but return the same outer shape.
+
+\term{Solution sketch.} Residual connections require matching shapes. A Transformer block is a representation-refinement machine, not a sequence-length-changing machine.
+
+\section{Lab 9: Overfit One Batch}
+
+\term{Goal.} Prove the training path can learn before using a real dataset.
+
+\term{Procedure.}
+
+\begin{enumerate}
+  \item Choose one fixed batch.
+  \item Disable dropout.
+  \item Train for many steps on that same batch.
+  \item Confirm loss decreases sharply.
+\end{enumerate}
+
+\term{Acceptance test.} Loss drops much faster than in a real training run.
+
+\term{Solution sketch.} Overfitting one batch is a wiring test. If the model cannot memorize one batch, inspect target shifting, optimizer stepping, gradient zeroing, model mode, and dtype.
+
+\section{Lab 10: Tiny Pretraining Run}
+
+\term{Goal.} Train a tiny GPT on a small corpus.
+
+\term{Procedure.}
+
+\begin{lstlisting}
+python scripts/train_torch.py --config configs/smoke_cpu.yaml
+\end{lstlisting}
+
+\term{Acceptance test.}
+
+\begin{itemize}
+  \item Training logs appear.
+  \item Loss is finite.
+  \item Validation runs.
+  \item A checkpoint is saved.
+\end{itemize}
+
+\term{Solution sketch.} This is the first full system test: data loader, model, loss, optimizer, scheduler, evaluation, logging, and checkpointing all operate together.
+
+\section{Lab 11: Reproduce the GPT21 PyTorch Reference Run}
+
+\term{Goal.} Use the successful GPT21 Wikitext103 DDP run as an industry-style baseline.
+
+\term{Reference configuration.}
+
+\begin{lstlisting}
+model:
+  vocab_size: 32000
+  block_size: 512
+  n_layer: 6
+  n_head: 6
+  n_embd: 384
+  dropout: 0.1
+train:
+  max_steps: 10000
+  micro_batch_size: 1
+  gradient_accumulation_steps: 32
+  learning_rate: 0.0003
+  min_learning_rate: 0.00003
+\end{lstlisting}
+
+\term{Acceptance test.} A report should include checkpoint cadence, loss curve, best listed validation checkpoint, step time, and at least five samples. The reference run reached step 9999 and showed a best listed validation loss of 3.6265 near step 8250.
+
+\term{Solution sketch.} A real run is more than a final checkpoint. It is a sequence of decisions: model size, data split, optimizer settings, save interval, evaluation interval, and hardware budget.
+
+\section{Lab 12: Checkpoint Resume}
+
+\term{Goal.} Stop and resume training without losing optimizer state.
+
+\term{Procedure.}
+
+\begin{enumerate}
+  \item Train for a fixed number of steps.
+  \item Save checkpoint.
+  \item Load checkpoint.
+  \item Continue training.
+  \item Compare loss before and after resume.
+\end{enumerate}
+
+\term{Acceptance test.} The resumed run continues with the correct step, learning rate schedule, optimizer state, and model weights.
+
+\term{Solution sketch.} Loading only weights is not the same as resuming training. AdamW moment buffers, scheduler position, random number state, and step count all affect the next update.
+
+\section{Lab 13: Sampling Study}
+
+\term{Goal.} Compare decoding choices after training.
+
+\term{Procedure.} Generate text from the same prompt using greedy decoding, temperature sampling, top-\(k\), and top-\(p\).
+
+\begin{longtable}{p{0.18\textwidth}p{0.18\textwidth}p{0.44\textwidth}}
+\toprule
+\term{Method} & \term{Setting} & \term{Expected behavior} \\
+\midrule
+Greedy & temperature 0 or argmax & stable but repetitive \\
+Temperature & \(T < 1\) or \(T > 1\) & lower is conservative; higher is more random \\
+Top-\(k\) & keep \(k\) tokens & removes very unlikely tokens \\
+Top-\(p\) & keep nucleus mass \(p\) & adapts candidate count to distribution shape \\
+\bottomrule
+\end{longtable}
+
+\term{Acceptance test.} The report explains how outputs change when the sampling method changes.
+
+\term{Solution sketch.} Training defines probabilities. Decoding chooses how to use them. A model is not only its weights; it is also an inference policy.
+
+\section{Lab 14: Checkpoint and Buffer Inspection}
+
+\term{Goal.} Identify the difference between data files, training checkpoints, runtime buffers, and inference exports.
+
+\term{Procedure.}
+
+\begin{lstlisting}
+ls -lh data/tokens/wikitext103/*.bin
+ls -lh checkpoints/gpt21-wikitext103-ddp/*.pt
+python scripts/inspect_bin.py data/tokens/wikitext103/train.bin --count 16
+\end{lstlisting}
+
+\term{Acceptance test.} Students can explain:
+
+\begin{itemize}
+  \item why token \texttt{.bin} files are not checkpoints;
+  \item why PyTorch \texttt{.pt} files are useful for resume;
+  \item why GGUF is useful for inference;
+  \item why activations and gradients are usually runtime buffers, not saved release files.
+\end{itemize}
+
+\term{Solution sketch.} LLM systems are collections of artifacts. Confusing token data, model weights, optimizer state, and inference files leads to broken experiments.
+
+\section{Lab 15: Candle Device and Tiny Training Check}
+
+\term{Goal.} Verify that the Rust path can run tensors and begin a tiny training loop.
+
+\term{Procedure.}
+
+\begin{lstlisting}
+cargo run --release -p candle-device-check
+cargo run --release -p candle-device-check --features cuda
+cargo run --release -p gpt21-candle-train -- \
+  --config configs/gpt21-candle-smoke.yaml
+\end{lstlisting}
+
+\term{Acceptance test.}
+
+\begin{itemize}
+  \item CPU device check passes.
+  \item CUDA check passes where CUDA is installed.
+  \item A tiny forward pass produces logits of expected shape.
+  \item Tiny training loss is finite and can decrease on a small batch.
+\end{itemize}
+
+\term{Solution sketch.} Candle should not be treated as a scaffold only. The Rust path must prove the same mathematical contract as PyTorch: same token IDs, same shapes, same loss meaning, and clear checkpoint behavior.
+
+\section{Lab 16: Backend Equivalence Report}
+
+\term{Goal.} Compare PyTorch, Candle, and llm.c-style execution without pretending they are the same software.
+
+\term{Procedure.}
+
+\begin{enumerate}
+  \item Use the same tiny GPT config.
+  \item Use the same token batch.
+  \item Compare output shapes.
+  \item Compare initial loss scale.
+  \item Compare checkpoint or weight export format.
+  \item Explain numerical differences.
+\end{enumerate}
+
+\term{Acceptance test.} The report separates mathematical equivalence from implementation identity.
+
+\begin{longtable}{p{0.18\textwidth}p{0.28\textwidth}p{0.34\textwidth}}
+\toprule
+\term{Path} & \term{Best at} & \term{Main risk} \\
+\midrule
+PyTorch & learning, debugging, research iteration & Python runtime and framework abstraction hide systems details \\
+Candle & Rust integration, deployment-adjacent training, typed systems work & more manual engineering and ecosystem maturity questions \\
+llm.c & raw systems understanding, CUDA performance study & harder extension and less forgiving debugging \\
+\bottomrule
+\end{longtable}
+
+\term{Solution sketch.} The equation \(QK^\top/\sqrt{d}\) is backend-independent. Tensor ownership, memory layout, kernel launch, serialization, and debugging tools are backend-specific.
+
+\section{Lab 17: llm.c Reference Study}
+
+\term{Goal.} Study low-level training code while keeping project ownership clear.
+
+\term{Procedure.}
+
+\begin{lstlisting}
+vendor/llm.c/          upstream snapshot or submodule
+backends/llmc_cuda/    MapleAI comparison wrappers and notes
+docs/                  build and benchmark explanation
+\end{lstlisting}
+
+Build or inspect the reference implementation separately. Record the compiler, CUDA version, supported model shapes, data format, and training target.
+
+\term{Acceptance test.} Students can draw a buffer diagram for parameters, activations, gradients, optimizer state, and token batches.
+
+\term{Solution sketch.} llm.c is valuable because it makes framework-hidden machinery explicit. It should be treated as a reference or vendor component unless MapleAI owns and documents modifications clearly.
+
+\section{Lab 18: Supervised Fine-Tuning}
+
+\term{Goal.} Fine-tune a tiny base model on a small instruction dataset using a masked assistant-token loss.
+
+\term{Procedure.}
+
+\begin{enumerate}
+  \item Write 20 high-quality instruction examples.
+  \item Choose one chat template.
+  \item Tokenize records and create a loss mask.
+  \item Fine-tune from a base checkpoint.
+  \item Compare before and after samples.
+\end{enumerate}
+
+\term{Acceptance test.} The report includes the prompt template, mask rule, SFT loss curve, validation prompts, and regression prompts.
+
+\term{Solution sketch.} SFT is not a new model architecture. It is continued next-token training on a new distribution with a carefully chosen mask.
+
+\section{Lab 19: GGUF Export and Local Inference}
+
+\term{Goal.} Understand GGUF as an inference artifact, not a training checkpoint.
+
+\term{Procedure.}
+
+\begin{lstlisting}
+# 1. Export the backend checkpoint to a canonical HF-style directory.
+python scripts/export_hf.py \
+  --checkpoint checkpoints/gpt21-wikitext103-ddp/step-8250.pt \
+  --out exports/gpt21-hf
+
+# 2. Convert that directory to GGUF.
+python /path/to/llama.cpp/convert_hf_to_gguf.py \
+  exports/gpt21-hf \
+  --outfile exports/gpt21-f16.gguf \
+  --outtype f16
+
+# 3. Optionally quantize the GGUF file.
+/path/to/llama.cpp/build/bin/llama-quantize \
+  exports/gpt21-f16.gguf \
+  exports/gpt21-q4_k_m.gguf \
+  Q4_K_M
+\end{lstlisting}
+
+\term{Acceptance test.}
+
+\begin{itemize}
+  \item Source checkpoint is preserved.
+  \item HF-style export directory contains config, tokenizer, and weights.
+  \item GGUF metadata is inspected.
+  \item Source backend and GGUF runtime are compared on the same prompts.
+\end{itemize}
+
+\term{Solution sketch.} GGUF packages inference metadata and tensors for GGML/llama.cpp-style runtimes. It does not replace the full training checkpoint because training resume needs optimizer and scheduler state.
+
+\section{Lab 20: Final Capstone Report}
+
+\term{Goal.} Produce a professional training-pack report that a new engineer could reproduce.
+
+\term{Required sections.}
+
+\begin{itemize}
+  \item objective and research question;
+  \item environment and hardware;
+  \item dataset card;
+  \item tokenizer and token binary format;
+  \item model config and parameter count;
+  \item training command;
+  \item loss curves and selected checkpoints;
+  \item sample outputs with decoding settings;
+  \item backend comparison if applicable;
+  \item fine-tuning dataset and mask if applicable;
+  \item GGUF export notes if applicable;
+  \item failures, fixes, limitations, and next experiments.
+\end{itemize}
+
+\term{Acceptance test.} Another student can rerun the experiment or explain exactly why they cannot.
+
+\section{Final Oral Exam Questions}
+
+\begin{enumerate}
+  \item What is the difference between token data, model weights, optimizer state, activations, and a GGUF file?
+  \item Why does a GPT use a causal mask during training even though the whole sequence is processed in parallel?
+  \item How does gradient accumulation change effective batch size without changing microbatch memory?
+  \item Why can validation loss improve while sample quality still looks poor?
+  \item What does Candle change about the engineering workflow compared with PyTorch?
+  \item Why is llm.c a useful reference even if the main training path is PyTorch?
+  \item What must be preserved to make a fine-tuned model reproducible?
+  \item What tests would convince you that a GGUF export is correct enough for local inference?
+\end{enumerate}
+
+\subsection*{Answer Key}
+
+\begin{enumerate}
+  \item Token data is the training corpus encoded as IDs. Model weights are learned parameters. Optimizer state stores update history. Activations are runtime tensors from forward passes. GGUF is an inference-oriented package with metadata and tensors.
+  \item The model must not learn by seeing future answers. The causal mask preserves autoregressive prediction while allowing efficient parallel computation.
+  \item It sums gradients over multiple microbatches before one optimizer step, so the optimizer sees a larger effective batch without storing all activations at once.
+  \item Loss measures probability of held-out tokens. Sampling also depends on decoding settings, prompt quality, model capacity, overfitting, and repetition behavior.
+  \item Candle moves the work into Rust, making ownership, compilation, deployment integration, and typed configuration more central.
+  \item llm.c exposes low-level buffers and kernels, helping students see what frameworks automate.
+  \item Preserve data version, tokenizer, prompt template, mask rule, config, weights, optimizer state for resume, code revision, and evaluation prompts.
+  \item Compare tokenizer metadata, tensor shapes, prompt outputs, logit or probability behavior where possible, file metadata, and runtime outputs across several prompts.
+\end{enumerate}

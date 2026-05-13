@@ -1,0 +1,174 @@
+\chapter{Glossary and Notation Reference}
+
+This chapter is a compact reference for the vocabulary, symbols, file formats, and equations used throughout the book. New students should return to it often. Professional engineers should use it as a shared language checklist when discussing a training run.
+
+\section{Glossary}
+
+\begin{longtable}{p{0.24\textwidth}p{0.62\textwidth}}
+\toprule
+\term{Term} & \term{Meaning} \\
+\midrule
+Activation & A tensor value produced inside the model during the forward pass. Activations are needed for backpropagation unless recomputed. \\
+AdamW & An optimizer using adaptive first and second moment estimates with decoupled weight decay. \\
+Alignment & Training and evaluation work that makes model behavior better match intended human, product, or safety preferences. \\
+Attention & A mechanism that lets token positions read weighted information from other positions. \\
+Attention head & One parallel attention subspace with its own query, key, and value projections. \\
+Autograd & Automatic differentiation system that records differentiable operations and computes gradients. \\
+Backpropagation & Efficient chain-rule computation of gradients through a computation graph. \\
+Base model & A model trained primarily on broad next-token prediction before task-specific fine-tuning. \\
+Batch & A group of examples processed together. \\
+Block size & Maximum sequence length used by the model during training or inference. Also called context length. \\
+BPE & Byte Pair Encoding, a subword tokenization method based on frequent adjacent symbol merges. \\
+Buffer & Memory region used to store data, parameters, activations, gradients, optimizer state, KV cache, or temporary workspace. \\
+Catastrophic forgetting & Loss of useful previous model behavior after training too strongly on a narrower dataset. \\
+Causal mask & Mask that prevents a GPT model from attending to future tokens. \\
+Checkpoint & Saved training state, usually including model weights, optimizer state, config, random state, and step. \\
+Context length & Maximum number of tokens the model processes at once. Also called block size. \\
+Cross entropy & Loss function that punishes low probability assigned to the correct class. \\
+CUDA & NVIDIA's GPU programming platform used by many deep learning systems. \\
+Dataset card & Document describing data source, license, preprocessing, splits, risks, and metadata. \\
+DDP & Distributed Data Parallel training, where multiple workers compute gradients and average them. \\
+Decoder-only Transformer & Transformer architecture used by GPT-style autoregressive language models. \\
+Dropout & Regularization method that randomly zeroes some activations during training. \\
+Embedding & Trainable vector representation of a token or position. \\
+Epoch & One pass over a dataset. LLM training is often measured by tokens and steps instead. \\
+Fine-tuning & Continuing training from a checkpoint on a more specific dataset or task. \\
+FP16 & 16-bit floating-point dtype often used to reduce memory and increase throughput. \\
+Gradient & Vector of partial derivatives telling how loss changes with parameters. \\
+Gradient accumulation & Summing gradients over microbatches before an optimizer step. \\
+Gradient clipping & Limiting gradient norm to reduce unstable updates. \\
+GGUF & GGML Universal File, a self-describing binary format commonly used by GGML/llama.cpp-style inference runtimes. \\
+Head dimension & Channel width assigned to one attention head, usually \(d_{\text{model}}/n_{\text{head}}\). \\
+Inference & Using a trained model to produce outputs without updating weights. \\
+Instruction tuning & Supervised fine-tuning on examples that teach the model to follow instructions. \\
+KV cache & Stored keys and values used to speed up autoregressive generation. \\
+LayerNorm & Normalization layer that stabilizes hidden states across feature dimensions. \\
+Learning rate & Step-size hyperparameter used by an optimizer. \\
+LoRA & Low-Rank Adaptation, a parameter-efficient fine-tuning method that learns small low-rank updates to selected weight matrices. \\
+Logit & Raw unnormalized score before softmax. \\
+Loss mask & Binary tensor indicating which token positions should contribute to the training loss. \\
+Manifest & Metadata file describing artifact paths, schema versions, hashes, dtypes, and backend identity. \\
+Microbatch & The batch processed in one forward/backward pass before gradient accumulation. \\
+MLP & Feed-forward network inside each Transformer block. \\
+NCCL & NVIDIA communication library commonly used for multi-GPU collectives. \\
+Optimizer state & Extra tensors used by an optimizer, such as AdamW moment estimates. \\
+Parameter & Learned tensor stored by the model, such as an embedding table or projection matrix. \\
+Parameter-efficient fine-tuning & Fine-tuning method that updates a small number of parameters instead of the full model. \\
+Perplexity & \(e^{\text{cross entropy}}\), a measure related to average uncertainty. \\
+Pretraining & Training a base model on broad next-token prediction data. \\
+Preference data & Training data containing comparisons, usually a prompt with a chosen answer and a rejected answer. \\
+Prompt template & Literal formatting used to turn structured records into text shown to the model. \\
+Quantization & Representing weights with fewer bits to reduce memory and speed inference, often with some numerical loss. \\
+Residual connection & Addition path that lets a layer modify a representation without replacing it entirely. \\
+Safetensors & Tensor serialization format commonly used for model weights, with tensor metadata stored separately from executable code. \\
+Scheduler & Rule that changes learning rate over training steps. \\
+Softmax & Function converting logits into probabilities that sum to one. \\
+SFT & Supervised fine-tuning on examples of desired input-output behavior. \\
+State dict & Mapping from parameter names to tensors, commonly used by PyTorch. \\
+Tensor & Multidimensional numerical array with a shape, dtype, and device. \\
+Token & Integer-coded unit of text used by the model. \\
+Token shard & Binary file containing a contiguous region of token IDs from a dataset split. \\
+Tokenizer & System that converts text to token IDs and token IDs back to text. \\
+Top-\(k\) sampling & Decoding method that samples only from the \(k\) most likely next tokens. \\
+Top-\(p\) sampling & Decoding method that samples from the smallest set of tokens whose total probability exceeds \(p\). \\
+Transformer block & Layer containing attention, MLP, normalization, and residual connections. \\
+Validation set & Held-out data used to monitor training decisions. \\
+Vocabulary & The set of token IDs the model can read and predict. \\
+Weight tying & Sharing the token embedding matrix and output projection matrix. \\
+\bottomrule
+\end{longtable}
+
+\section{Notation}
+
+\begin{longtable}{p{0.16\textwidth}p{0.25\textwidth}p{0.43\textwidth}}
+\toprule
+\term{Symbol} & \term{Typical shape} & \term{Meaning} \\
+\midrule
+\(B\) & scalar & Batch size. \\
+\(T\) & scalar & Sequence length or block size. \\
+\(V\) & scalar & Vocabulary size. \\
+\(C\) or \(d_{\text{model}}\) & scalar & Model channel width. \\
+\(H\) & scalar & Number of attention heads. \\
+\(d_h\) & scalar & Per-head dimension, usually \(C/H\). \\
+\(x\) & \(\shape{[B,T]}\) & Input token IDs. \\
+\(y\) & \(\shape{[B,T]}\) & Target token IDs shifted by one. \\
+\(X\) & \(\shape{[B,T,C]}\) & Hidden states or embeddings. \\
+\(Q,K,V_{\text{attn}}\) & \([B,H,T,d_h]\) & Query, key, and value tensors in multi-head attention. \\
+\(A\) & \(\shape{[B,H,T,T]}\) & Attention probability matrix after softmax. \\
+\(z\) & \(\shape{[B,T,V]}\) & Logits over vocabulary. \\
+\(\theta\) & collection & Trainable model parameters. \\
+\(\eta\) & scalar & Learning rate. \\
+\(L\) & scalar & Loss. \\
+\(M\) & \(\shape{[B,T]}\) & Loss mask for SFT or padding. \\
+\bottomrule
+\end{longtable}
+
+\section{Core Equations}
+
+\[
+\operatorname{softmax}(\mathbf{z})_i =
+\frac{e^{z_i}}{\sum_j e^{z_j}}
+\]
+
+\[
+L_{\text{CE}} = -\frac{1}{N}\sum_{n=1}^{N}\log p_{n,y_n}
+\]
+
+\[
+\operatorname{Attention}(Q,K,V) =
+\operatorname{softmax}\left(\frac{QK^\top}{\sqrt{d_h}}\right)V
+\]
+
+\[
+\theta_{t+1} = \theta_t - \eta \nabla_{\theta}L(\theta_t)
+\]
+
+\[
+B_{\text{effective}} =
+B_{\text{micro}} \times \text{grad\_accum\_steps} \times \text{world\_size}
+\]
+
+\[
+L_{\text{SFT}}
+=
+-\frac{
+\sum_{b,t}M_{b,t}\log p_{\theta}(y_{b,t}\mid x_{b,\leq t})
+}{
+\sum_{b,t}M_{b,t}
+}
+\]
+
+\[
+\Delta W_{\text{LoRA}} = \frac{\alpha}{r}BA
+\]
+
+\section{File and Artifact Reference}
+
+\begin{longtable}{p{0.18\textwidth}p{0.28\textwidth}p{0.38\textwidth}}
+\toprule
+\term{Artifact} & \term{Contains} & \term{Used for} \\
+\midrule
+\texttt{train.bin} & Contiguous token IDs. & Training data stream. \\
+\texttt{valid.bin} & Held-out token IDs. & Validation loss and evaluation. \\
+\texttt{.pt} & PyTorch checkpoint or tensor state. & Training resume, model loading, debugging. \\
+\texttt{.safetensors} & Tensor archive with metadata. & Safer weight interchange and export. \\
+\texttt{config.json} & Architecture and runtime metadata. & Reconstructing the model correctly. \\
+\texttt{tokenizer.json} & Tokenizer vocabulary, merges, and special tokens. & Text-to-ID and ID-to-text conversion. \\
+\texttt{.gguf} & Self-describing inference file with metadata and tensors. & llama.cpp/GGML-style local inference. \\
+\texttt{events.out.*} & TensorBoard event logs. & Curves and experiment monitoring. \\
+\texttt{metrics.jsonl} & Step-by-step metric records. & Reproducible analysis and plotting. \\
+\bottomrule
+\end{longtable}
+
+\section{Backend Reference}
+
+\begin{longtable}{p{0.16\textwidth}p{0.32\textwidth}p{0.34\textwidth}}
+\toprule
+\term{Backend} & \term{Strength} & \term{Best first question} \\
+\midrule
+PyTorch & Flexible research training, debugging, autograd, DDP. & Does the model and loss work correctly? \\
+Candle & Rust-native tensors, deployment-adjacent systems path. & Can the same math become a Rust training/runtime asset? \\
+llm.c & Explicit C/CUDA buffers and kernels. & What does the framework hide, and how fast can the low-level path run? \\
+GGUF runtime & Local quantized inference. & Can a validated model be packaged for efficient local serving? \\
+\bottomrule
+\end{longtable}

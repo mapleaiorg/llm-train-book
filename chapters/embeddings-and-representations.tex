@@ -1,0 +1,716 @@
+\chapter{Embeddings And Representations}
+
+Tokenization gave TinyGPT a stream of integers. PyTorch can store those integers, and a data loader can batch them, but the integers themselves are not yet useful for language understanding. The number \(2\) is not automatically ``more like'' the number \(3\) than the number \(8\). Token IDs are labels, not measurements.
+
+Embeddings are the first trainable bridge from symbolic text to numerical learning. They turn token IDs into vectors, and those vectors become the working memory of the model.
+
+\section{Chapter Goals}
+
+By the end of this chapter, you should be able to:
+
+\begin{itemize}
+  \item explain why token IDs are arbitrary labels;
+  \item describe an embedding table as a trainable lookup matrix;
+  \item trace TinyGPT token IDs into vectors with shape \shape{[B,T,C]};
+  \item explain why GPT adds token embeddings and position embeddings;
+  \item connect embedding updates to backpropagation and next-token loss;
+  \item explain weight tying between input embeddings and the output head;
+  \item calculate embedding parameter counts for tiny and larger models;
+  \item read and debug the source code that creates initial GPT representations.
+\end{itemize}
+
+\section{The Running TinyGPT Example}
+
+We continue with the TinyGPT sentence:
+
+\begin{quote}
+\texttt{Tiny GPT models learn from tokens .}
+\end{quote}
+
+One toy vocabulary is:
+
+\begin{longtable}{p{0.16\textwidth}p{0.22\textwidth}p{0.46\textwidth}}
+\toprule
+\term{ID} & \term{Token} & \term{Comment} \\
+\midrule
+0 & \texttt{<pad>} & optional padding token \\
+1 & \texttt{<unk>} & unknown token \\
+2 & \texttt{Tiny} & first content token \\
+3 & \texttt{GPT} & model-name token \\
+4 & \texttt{models} & noun or verb depending on context \\
+5 & \texttt{learn} & action token \\
+6 & \texttt{from} & relation token \\
+7 & \texttt{tokens} & object token \\
+8 & \texttt{.} & punctuation token \\
+\bottomrule
+\end{longtable}
+
+The token stream is:
+
+\[
+[2,3,4,5,6,7,8].
+\]
+
+With \(B=2\), \(T=4\), \(C=6\), and \(V=9\), a batch might be:
+
+\[
+x =
+\begin{bmatrix}
+2 & 3 & 4 & 5\\
+3 & 4 & 5 & 6
+\end{bmatrix}
+\in \mathbb{Z}^{2\times4}.
+\]
+
+The embedding layer turns this into:
+
+\[
+X \in \mathbb{R}^{2\times4\times6}.
+\]
+
+\begin{center}
+\begin{tikzpicture}[
+  cell/.style={draw, minimum width=0.62cm, minimum height=0.46cm, align=center},
+  box/.style={draw, rounded corners=2pt, minimum height=0.65cm, text width=2.2cm, align=center},
+  arrow/.style={-{Latex[length=2mm]}, thick},
+  note/.style={font=\small, align=center}
+]
+\node[box, fill=blue!5] (ids) at (0,0) {token IDs\\\shape{[2,4]}};
+\foreach \r/\vals in {0/{2,3,4,5},1/{3,4,5,6}} {
+  \foreach \c in {0,1,2,3} {
+    \pgfmathtruncatemacro{\idx}{\c+1}
+    \node[cell, fill=blue!5] at (2.2+\c*0.62,-\r*0.46) {\scriptsize \pgfmathparse{{\vals}[\c]}\pgfmathresult};
+  }
+}
+\node[box, fill=red!8] (lookup) at (5.3,-0.23) {embedding\\lookup table};
+\node[box, fill=green!10] (vecs) at (8.4,-0.23) {vectors\\\shape{[2,4,6]}};
+\draw[arrow] (ids) -- (1.65,-0.23);
+\draw[arrow] (4.95,-0.23) -- (lookup);
+\draw[arrow] (lookup) -- (vecs);
+\node[note] at (5.3,-1.25) {IDs choose rows; no arithmetic meaning is assumed.};
+\end{tikzpicture}
+\end{center}
+
+\section{Token IDs Are Names, Not Quantities}
+
+A beginner mistake is to treat token IDs like ordinary numbers. If \texttt{Tiny} has ID \(2\), \texttt{GPT} has ID \(3\), and \texttt{tokens} has ID \(7\), that does not mean:
+
+\[
+\texttt{Tiny} < \texttt{GPT} < \texttt{tokens}
+\]
+
+in any semantic sense. The IDs are assigned by a tokenizer. They are more like row numbers in a spreadsheet than measurements.
+
+\begin{center}
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners=2pt, minimum height=0.64cm, text width=2.35cm, align=center},
+  arrow/.style={-{Latex[length=2mm]}, thick},
+  bad/.style={draw, rounded corners=2pt, minimum height=0.64cm, text width=3.0cm, align=center}
+]
+\node[box, fill=blue!5] (id2) at (0,0) {ID 2\\\texttt{Tiny}};
+\node[box, fill=blue!5] (id3) at (3.0,0) {ID 3\\\texttt{GPT}};
+\node[box, fill=blue!5] (id7) at (6.0,0) {ID 7\\\texttt{tokens}};
+\node[bad, fill=red!8] (wrong) at (3.0,-1.35) {wrong idea:\\ID distance = meaning distance};
+\draw[arrow] (id2) -- (wrong);
+\draw[arrow] (id3) -- (wrong);
+\draw[arrow] (id7) -- (wrong);
+\end{tikzpicture}
+\end{center}
+
+The model needs a trainable numerical representation. That is why the first layer of a GPT model is an embedding table.
+
+\section{One-Hot Vectors: The Conceptual Bridge}
+
+Before learning embeddings, it helps to imagine a token as a one-hot vector. For \(V=9\), the token \texttt{Tiny} with ID \(2\) could be represented as:
+
+\[
+\mathbf{e}_2 =
+\begin{bmatrix}
+0&0&1&0&0&0&0&0&0
+\end{bmatrix}.
+\]
+
+This vector has length \(V\). It says ``select row 2'' and nothing more.
+
+\begin{center}
+\begin{tikzpicture}[
+  cell/.style={draw, minimum width=0.56cm, minimum height=0.48cm, align=center},
+  arrow/.style={-{Latex[length=2mm]}, thick},
+  note/.style={font=\small, align=center}
+]
+\node[note] at (0,0.75) {one-hot vector for ID 2};
+\foreach \i in {0,1,2,3,4,5,6,7,8} {
+  \ifnum\i=2
+    \node[cell, fill=red!12] (c\i) at (\i*0.58,0) {\scriptsize 1};
+  \else
+    \node[cell, fill=blue!5] (c\i) at (\i*0.58,0) {\scriptsize 0};
+  \fi
+  \node[font=\tiny] at (\i*0.58,-0.45) {\i};
+}
+\node[note] (select) at (6.7,0) {selects\\row 2};
+\draw[arrow] (c2) -- (select);
+\end{tikzpicture}
+\end{center}
+
+If \(E_{\text{tok}}\in\mathbb{R}^{V\times C}\), then multiplying a one-hot row vector by the embedding table selects the corresponding row:
+
+\[
+\mathbf{e}_i E_{\text{tok}} = E_{\text{tok}}[i].
+\]
+
+In practice, PyTorch does not build a huge one-hot vector. It performs a direct lookup, which is faster and uses less memory.
+
+\begin{lstlisting}[language=Python]
+tok_emb = nn.Embedding(vocab_size, n_embd)
+vec = tok_emb(torch.tensor([2]))   # selects row 2
+\end{lstlisting}
+
+\section{The Token Embedding Table}
+
+Let vocabulary size be \(V\) and embedding dimension be \(C\). The token embedding table is:
+
+\[
+E_{\text{tok}} \in \mathbb{R}^{V \times C}.
+\]
+
+For TinyGPT:
+
+\[
+E_{\text{tok}} \in \mathbb{R}^{9 \times 6}.
+\]
+
+Each row is a trainable vector. For example:
+
+\[
+E_{\text{tok}}[2] =
+\begin{bmatrix}
+0.12&-0.04&0.31&0.08&-0.17&0.22
+\end{bmatrix}.
+\]
+
+\begin{center}
+\begin{tikzpicture}[
+  cell/.style={draw, minimum width=0.62cm, minimum height=0.42cm, align=center},
+  rowlab/.style={font=\scriptsize, align=right},
+  arrow/.style={-{Latex[length=2mm]}, thick},
+  note/.style={font=\small, align=center}
+]
+\node[note] at (2.5,0.6) {embedding table \(E_{\text{tok}}\in\mathbb{R}^{9\times6}\)};
+\foreach \r/\tok in {0/<pad>,1/<unk>,2/Tiny,3/GPT,4/models,5/learn,6/from,7/tokens,8/.} {
+  \node[rowlab, anchor=east] at (-0.15,-\r*0.42) {\r\ \texttt{\tok}};
+  \foreach \c in {0,1,2,3,4,5} {
+    \ifnum\r=2
+      \node[cell, fill=red!10] (r\r c\c) at (\c*0.62,-\r*0.42) {};
+    \else
+      \node[cell, fill=blue!4] at (\c*0.62,-\r*0.42) {};
+    \fi
+  }
+}
+\node[note] (id) at (5.1,-0.84) {ID 2 selects\\the \texttt{Tiny} row};
+\draw[arrow] (id.west) -- (r2c5.east);
+\node[note] at (1.55,-4.15) {The selected row is a length-\(C\) vector used by the model.};
+\end{tikzpicture}
+\end{center}
+
+\section{Lookup For A Batch}
+
+For a single token ID \(i\), lookup returns one vector:
+
+\[
+E_{\text{tok}}[i]\in\mathbb{R}^{C}.
+\]
+
+For a sequence of \(T\) IDs, lookup returns a matrix:
+
+\[
+E_{\text{tok}}[x_{0:T-1}]\in\mathbb{R}^{T\times C}.
+\]
+
+For a batch of \(B\) sequences, lookup returns a rank-3 tensor:
+
+\[
+E_{\text{tok}}[x]\in\mathbb{R}^{B\times T\times C}.
+\]
+
+\begin{center}
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners=2pt, minimum height=0.66cm, text width=2.15cm, align=center},
+  arrow/.style={-{Latex[length=2mm]}, thick},
+  note/.style={font=\small, align=center}
+]
+\node[box, fill=blue!5] (one) at (0,0) {one ID\\\shape{[]}};
+\node[box, fill=red!8] (onev) at (3,0) {one vector\\\shape{[C]}};
+\node[box, fill=blue!5] (seq) at (0,-1.15) {one sequence\\\shape{[T]}};
+\node[box, fill=red!8] (seqv) at (3,-1.15) {one matrix\\\shape{[T,C]}};
+\node[box, fill=blue!5] (batch) at (0,-2.30) {one batch\\\shape{[B,T]}};
+\node[box, fill=red!8] (batchv) at (3,-2.30) {one tensor\\\shape{[B,T,C]}};
+\draw[arrow] (one) -- (onev);
+\draw[arrow] (seq) -- (seqv);
+\draw[arrow] (batch) -- (batchv);
+\node[note] at (1.5,-3.15) {The same embedding table handles all three cases.};
+\end{tikzpicture}
+\end{center}
+
+\section{Position Embeddings: Giving Tokens An Address}
+
+Token embeddings identify \term{what} token is present. A GPT model also needs to know \term{where} the token appears.
+
+The sentences:
+
+\begin{quote}
+\texttt{models learn}
+\end{quote}
+
+and:
+
+\begin{quote}
+\texttt{learn models}
+\end{quote}
+
+contain the same token IDs but in different positions. Without position information, the initial token vectors would not know their order.
+
+TinyGPT uses a learned position embedding table:
+
+\[
+E_{\text{pos}}\in\mathbb{R}^{T_{\max}\times C}.
+\]
+
+For a block size of \(T_{\max}=4\) and \(C=6\):
+
+\[
+E_{\text{pos}}\in\mathbb{R}^{4\times6}.
+\]
+
+At position \(t\), the model adds:
+
+\[
+X_{b,t,:}=E_{\text{tok}}[x_{b,t}]+E_{\text{pos}}[t].
+\]
+
+\begin{center}
+\begin{tikzpicture}[
+  cell/.style={draw, minimum width=0.58cm, minimum height=0.46cm, align=center},
+  arrow/.style={-{Latex[length=2mm]}, thick},
+  plus/.style={circle, draw, minimum size=0.5cm, align=center},
+  note/.style={font=\small, align=center}
+]
+\foreach \i/\v in {0/0.12,1/-0.04,2/0.31,3/0.08,4/-0.17,5/0.22} {
+  \node[cell, fill=blue!5] (t\i) at (\i*0.58,0) {\scriptsize \v};
+}
+\node[note, anchor=east] at (-0.25,0) {token vector\\\texttt{Tiny}};
+\foreach \i/\v in {0/0.01,1/0.05,2/-0.02,3/0.03,4/0.04,5/-0.01} {
+  \node[cell, fill=yellow!18] (p\i) at (\i*0.58,-0.8) {\scriptsize \v};
+}
+\node[note, anchor=east] at (-0.25,-0.8) {position vector\\\(t=0\)};
+\node[plus] (add) at (4.1,-0.4) {\(+\)};
+\foreach \i/\v in {0/0.13,1/0.01,2/0.29,3/0.11,4/-0.13,5/0.21} {
+  \node[cell, fill=red!8] (x\i) at (5.0+\i*0.58,-0.4) {\scriptsize \v};
+}
+\node[note] at (6.45,0.45) {initial representation\\for \texttt{Tiny} at position 0};
+\draw[arrow] (t5) -- (add);
+\draw[arrow] (p5) -- (add);
+\draw[arrow] (add) -- (x0);
+\end{tikzpicture}
+\end{center}
+
+The addition works because both vectors have the same length \(C\). The result still has shape \shape{[C]}; it simply carries two kinds of information.
+
+\section{Broadcasting Position Embeddings Across The Batch}
+
+In source code, token embeddings have shape \shape{[B,T,C]}. Position embeddings for the positions \(0,1,\ldots,T-1\) have shape \shape{[T,C]}. PyTorch broadcasts the position embeddings across the batch axis:
+
+\[
+\shape{[B,T,C]} + \shape{[T,C]} \rightarrow \shape{[B,T,C]}.
+\]
+
+\begin{center}
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners=2pt, minimum height=0.65cm, text width=2.45cm, align=center},
+  arrow/.style={-{Latex[length=2mm]}, thick},
+  plus/.style={circle, draw, minimum size=0.5cm, align=center},
+  note/.style={font=\small, align=center}
+]
+\node[box, fill=blue!5] (tok) at (0,0) {token embeddings\\\shape{[B,T,C]}};
+\node[box, fill=yellow!18] (pos) at (0,-1.0) {position embeddings\\\shape{[T,C]}};
+\node[plus] (add) at (3.1,-0.5) {\(+\)};
+\node[box, fill=red!8] (x) at (6.1,-0.5) {initial hidden state\\\shape{[B,T,C]}};
+\draw[arrow] (tok) -- (add);
+\draw[arrow] (pos) -- (add);
+\draw[arrow] (add) -- (x);
+\node[note] at (3.1,-1.55) {same position table is reused for every batch example};
+\end{tikzpicture}
+\end{center}
+
+In PyTorch:
+
+\begin{lstlisting}[language=Python]
+B, T = idx.shape
+pos = torch.arange(0, T, device=idx.device)  # [T]
+tok = self.tok_emb(idx)                      # [B, T, C]
+pos = self.pos_emb(pos)                      # [T, C]
+x = tok + pos                                # [B, T, C]
+\end{lstlisting}
+
+The line \texttt{x = tok + pos} is small, but conceptually it creates the first representation the Transformer will process.
+
+\section{Representations Are Working States}
+
+An embedding vector is not a dictionary definition. It is a working state used by the model. The vector for \texttt{models} at the input may mostly encode token identity and position. After attention layers, the vector at that position may include information from earlier tokens.
+
+\begin{center}
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners=2pt, minimum height=0.65cm, text width=2.25cm, align=center},
+  arrow/.style={-{Latex[length=2mm]}, thick},
+  note/.style={font=\small, align=center}
+]
+\node[box, fill=blue!5] (e0) at (0,0) {input embedding\\identity + position};
+\node[box, fill=red!8] (e1) at (3,0) {after block 1\\local context};
+\node[box, fill=red!8] (e2) at (6,0) {after block 2\\richer context};
+\node[box, fill=green!10] (logit) at (9,0) {output head\\vocabulary scores};
+\draw[arrow] (e0) -- (e1);
+\draw[arrow] (e1) -- (e2);
+\draw[arrow] (e2) -- (logit);
+\node[note] at (4.5,-0.9) {The vector keeps the same width \(C\), but its information changes.};
+\end{tikzpicture}
+\end{center}
+
+This is why the word \term{representation} is useful. A representation is not only a vector. It is a vector with a role at a particular stage of computation.
+
+\section{How Embeddings Learn}
+
+At initialization, embedding rows are random. During training, the loss creates gradients that update only the rows used by the batch.
+
+Suppose the context is:
+
+\[
+\texttt{Tiny GPT models learn from}
+\]
+
+and the target next token is:
+
+\[
+\texttt{tokens}.
+\]
+
+If the model assigns too little probability to \texttt{tokens}, the cross-entropy loss is high. Backpropagation sends gradients through:
+
+\[
+\text{loss}\rightarrow \text{logits}\rightarrow \text{Transformer blocks}\rightarrow \text{input embeddings}.
+\]
+
+\begin{center}
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners=2pt, minimum height=0.65cm, text width=2.25cm, align=center},
+  arrow/.style={-{Latex[length=2mm]}, thick},
+  back/.style={{Latex[length=2mm]}-, thick, red!70!black},
+  note/.style={font=\small, align=center}
+]
+\node[box, fill=blue!5] (rows) at (0,0) {selected rows\\IDs 2,3,4,5};
+\node[box, fill=red!8] (model) at (3,0) {TinyGPT\\forward pass};
+\node[box, fill=green!10] (logits) at (6,0) {logits for\\next tokens};
+\node[box, fill=yellow!18] (loss) at (9,0) {loss};
+\draw[arrow] (rows) -- (model);
+\draw[arrow] (model) -- (logits);
+\draw[arrow] (logits) -- (loss);
+\draw[back] (rows.south) .. controls (3,-1.2) and (6,-1.2) .. (loss.south);
+\node[note] at (4.5,-1.55) {Gradients adjust embedding rows that participated in the example.};
+\end{tikzpicture}
+\end{center}
+
+In source code, the embedding table is an \texttt{nn.Parameter} inside \texttt{nn.Embedding}. The optimizer updates it like any other trainable weight.
+
+\section{Geometry: What Similarity Can Mean}
+
+After training, embeddings used in similar contexts may point in similar directions. A common measure is cosine similarity:
+
+\[
+\cos(\mathbf{a},\mathbf{b})
+=
+\frac{\mathbf{a}\cdot\mathbf{b}}
+{\|\mathbf{a}\|\,\|\mathbf{b}\|}.
+\]
+
+Cosine similarity is \(1\) when two vectors point in the same direction, \(0\) when they are orthogonal, and \(-1\) when they point in opposite directions.
+
+\begin{center}
+\begin{tikzpicture}[
+  arrow/.style={-{Latex[length=2mm]}, thick},
+  note/.style={font=\small, align=center}
+]
+\draw[->] (-0.2,0) -- (5.4,0) node[right] {\scriptsize feature 1};
+\draw[->] (0,-0.2) -- (0,3.2) node[above] {\scriptsize feature 2};
+\draw[arrow, blue!70!black] (0,0) -- (2.2,2.0) node[above] {\scriptsize \texttt{Tiny}};
+\draw[arrow, blue!70!black] (0,0) -- (2.7,2.2) node[right] {\scriptsize \texttt{GPT}};
+\draw[arrow, red!70!black] (0,0) -- (4.3,0.7) node[right] {\scriptsize \texttt{.}};
+\draw[dashed] (2.2,2.0) -- (2.7,2.2);
+\node[note] at (2.8,-0.65) {This 2D picture is only an illustration. Real embeddings may have hundreds or thousands of dimensions.};
+\end{tikzpicture}
+\end{center}
+
+Be careful: embedding geometry is useful, but it is not magic. The model learns whatever geometry helps reduce next-token loss on the training data.
+
+\section{The Output Head And Weight Tying}
+
+The embedding table reads tokens into the model:
+
+\[
+E_{\text{tok}}\in\mathbb{R}^{V\times C}.
+\]
+
+The language-model head maps hidden vectors back to vocabulary logits:
+
+\[
+z = hW_{\text{out}} + b,
+\qquad
+W_{\text{out}}\in\mathbb{R}^{C\times V}.
+\]
+
+Many GPT models tie the input embedding table and output head:
+
+\[
+W_{\text{out}} = E_{\text{tok}}^\top.
+\]
+
+Conceptually:
+
+\begin{itemize}
+  \item input side: ``What vector should this token ID become?''
+  \item output side: ``Which token vector is most compatible with this hidden state?''
+\end{itemize}
+
+\begin{center}
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners=2pt, minimum height=0.65cm, text width=2.45cm, align=center},
+  arrow/.style={-{Latex[length=2mm]}, thick},
+  note/.style={font=\small, align=center}
+]
+\node[box, fill=blue!5] (ids) at (0,0) {input IDs};
+\node[box, fill=red!8] (emb) at (3,0) {token embedding\\\(E_{\text{tok}}\)};
+\node[box, fill=green!10] (hidden) at (6,0) {hidden state\\\(h\)};
+\node[box, fill=red!8] (head) at (9,0) {output head\\\(E_{\text{tok}}^\top\)};
+\node[box, fill=yellow!18] (logits) at (12,0) {logits};
+\draw[arrow] (ids) -- (emb);
+\draw[arrow] (emb) -- (hidden);
+\draw[arrow] (hidden) -- (head);
+\draw[arrow] (head) -- (logits);
+\draw[<->, thick, dashed] (emb.south) .. controls (5,-1.3) and (7,-1.3) .. (head.south);
+\node[note] at (6,-1.65) {weight tying reuses the same token table for reading and scoring};
+\end{tikzpicture}
+\end{center}
+
+In PyTorch, weight tying can be written as:
+
+\begin{lstlisting}[language=Python]
+self.tok_emb = nn.Embedding(vocab_size, n_embd)
+self.lm_head = nn.Linear(n_embd, vocab_size, bias=False)
+self.lm_head.weight = self.tok_emb.weight
+\end{lstlisting}
+
+The shapes work because \texttt{nn.Linear(C,V)} stores its weight as \shape{[V,C]}. That is the same shape as \texttt{tok\_emb.weight}.
+
+\section{Parameter Count}
+
+The token embedding table has:
+
+\[
+V\times C
+\]
+
+parameters. The position embedding table has:
+
+\[
+T_{\max}\times C
+\]
+
+parameters.
+
+For TinyGPT:
+
+\[
+V=9,\qquad T_{\max}=4,\qquad C=6.
+\]
+
+So:
+
+\[
+\text{token embedding params}=9\times6=54,
+\]
+
+\[
+\text{position embedding params}=4\times6=24.
+\]
+
+Total embedding parameters:
+
+\[
+54+24=78.
+\]
+
+\begin{center}
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners=2pt, minimum height=0.68cm, text width=2.7cm, align=center},
+  arrow/.style={-{Latex[length=2mm]}, thick}
+]
+\node[box, fill=blue!5] (tok) at (0,0) {token embeddings\\\(V C = 54\)};
+\node[box, fill=yellow!18] (pos) at (3.4,0) {position embeddings\\\(T_{\max}C = 24\)};
+\node[box, fill=red!8] (total) at (6.8,0) {embedding total\\78 parameters};
+\draw[arrow] (tok) -- (pos);
+\draw[arrow] (pos) -- (total);
+\end{tikzpicture}
+\end{center}
+
+For a larger GPT-style model with \(V=50{,}257\) and \(C=768\):
+
+\[
+50{,}257\times768=38{,}597{,}376
+\]
+
+token embedding parameters. This is why vocabulary size matters. A larger vocabulary may shorten token sequences, but it also expands the embedding table and output vocabulary.
+
+\section{Embedding Source Code Logic}
+
+A minimal TinyGPT embedding module looks like this:
+
+\begin{lstlisting}[language=Python]
+class TinyGPTEmbeddings(nn.Module):
+    def __init__(self, vocab_size, block_size, n_embd):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.block_size = block_size
+        self.n_embd = n_embd
+        self.tok_emb = nn.Embedding(vocab_size, n_embd)
+        self.pos_emb = nn.Embedding(block_size, n_embd)
+
+    def forward(self, idx):
+        # idx: [B, T]
+        B, T = idx.shape
+        assert T <= self.block_size
+        assert idx.min() >= 0
+        assert idx.max() < self.vocab_size
+
+        pos = torch.arange(0, T, device=idx.device)  # [T]
+        tok = self.tok_emb(idx)                      # [B, T, C]
+        pos = self.pos_emb(pos)                      # [T, C]
+        x = tok + pos                                # [B, T, C]
+        return x
+\end{lstlisting}
+
+The assertions are educational but valuable. They catch the most common data/model mismatch bugs:
+
+\begin{itemize}
+  \item token ID outside the vocabulary;
+  \item sequence length longer than block size;
+  \item tokenizer vocabulary not matching model configuration.
+\end{itemize}
+
+\begin{center}
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners=2pt, minimum height=0.62cm, text width=2.3cm, align=center},
+  arrow/.style={-{Latex[length=2mm]}, thick},
+  note/.style={font=\small, align=center}
+]
+\node[box, fill=blue!5] (idx) at (0,0) {\texttt{idx}\\\shape{[B,T]}};
+\node[box, fill=gray!12] (check) at (2.8,0) {shape and ID\\checks};
+\node[box, fill=blue!5] (tok) at (5.6,0.65) {\texttt{tok\_emb}\\\shape{[B,T,C]}};
+\node[box, fill=yellow!18] (pos) at (5.6,-0.65) {\texttt{pos\_emb}\\\shape{[T,C]}};
+\node[box, fill=red!8] (x) at (8.7,0) {initial state\\\shape{[B,T,C]}};
+\draw[arrow] (idx) -- (check);
+\draw[arrow] (check) -- (tok);
+\draw[arrow] (check) -- (pos);
+\draw[arrow] (tok) -- (x);
+\draw[arrow] (pos) -- (x);
+\node[note] at (4.8,-1.55) {This module prepares the input for the first Transformer block.};
+\end{tikzpicture}
+\end{center}
+
+\section{Engineering Practice}
+
+Embedding code should check:
+
+\begin{itemize}
+  \item token IDs are within \([0,V-1]\);
+  \item sequence length does not exceed the configured block size;
+  \item embedding output shape is \shape{[B,T,C]};
+  \item tokenizer vocabulary size matches model config;
+  \item checkpoint metadata records tokenizer identity;
+  \item tied or untied output-head choice is saved in config;
+  \item device placement is consistent for input IDs and embedding parameters.
+\end{itemize}
+
+For the \texttt{llm-train} project, the tokenizer and model config should be treated as one contract. If a checkpoint was trained with one vocabulary, loading it with a different tokenizer is usually invalid even if the code runs.
+
+\section{Hands-On Lab: Inspect TinyGPT Embeddings}
+
+Create a small script that builds an embedding module and traces shapes:
+
+\begin{lstlisting}[language=Python]
+import torch
+import torch.nn as nn
+
+torch.manual_seed(1)
+B, T, C, V = 2, 4, 6, 9
+
+idx = torch.tensor([[2, 3, 4, 5],
+                    [3, 4, 5, 6]], dtype=torch.long)
+
+tok_emb = nn.Embedding(V, C)
+pos_emb = nn.Embedding(T, C)
+
+pos = torch.arange(0, T)
+tok = tok_emb(idx)
+pos_vec = pos_emb(pos)
+x = tok + pos_vec
+
+print("idx:", idx.shape)
+print("tok:", tok.shape)
+print("pos_vec:", pos_vec.shape)
+print("x:", x.shape)
+print("Tiny row:", tok_emb.weight[2])
+\end{lstlisting}
+
+Then add a language-model head and tie weights:
+
+\begin{lstlisting}[language=Python]
+lm_head = nn.Linear(C, V, bias=False)
+lm_head.weight = tok_emb.weight
+
+logits = lm_head(x)
+print("logits:", logits.shape)
+print("shared object:", lm_head.weight is tok_emb.weight)
+\end{lstlisting}
+
+Expected shapes:
+
+\begin{lstlisting}
+idx:     [2, 4]
+tok:     [2, 4, 6]
+pos_vec: [4, 6]
+x:       [2, 4, 6]
+logits:  [2, 4, 9]
+\end{lstlisting}
+
+\checkpoint
+
+\begin{enumerate}
+  \item Why are token IDs not meaningful numerical distances?
+  \item What shape is the TinyGPT token embedding table when \(V=9\) and \(C=6\)?
+  \item Why does a sequence of IDs with shape \shape{[T]} become \shape{[T,C]} after embedding?
+  \item Why does GPT need position embeddings?
+  \item What does \texttt{x = tok + pos} combine?
+  \item What is weight tying?
+  \item Why must tokenizer identity be stored with a checkpoint?
+  \item If \(V=8192\), \(T_{\max}=256\), and \(C=384\), how many token and position embedding parameters are there?
+\end{enumerate}
+
+\subsection*{Solutions}
+
+\begin{enumerate}
+  \item Token IDs are labels assigned by the tokenizer. Their numeric distance does not encode semantic distance.
+  \item The table has shape \shape{[9,6]} because it has one row for each vocabulary token and six features per row.
+  \item Each ID selects one length-\(C\) row from the embedding table. A length-\(T\) list of IDs selects \(T\) rows, giving \shape{[T,C]}.
+  \item Token embeddings alone do not tell the model where a token appears. Position embeddings give each token representation an address in the context window.
+  \item It combines token identity information and position information into the initial hidden state.
+  \item Weight tying reuses the token embedding table as the output vocabulary classifier, usually by sharing \texttt{tok\_emb.weight} with \texttt{lm\_head.weight}.
+  \item The rows of the embedding table correspond to token IDs. If the tokenizer changes, row meanings change, so the checkpoint can be misinterpreted.
+  \item Token embeddings: \(8192\times384=3{,}145{,}728\). Position embeddings: \(256\times384=98{,}304\). Total: \(3{,}244{,}032\).
+\end{enumerate}

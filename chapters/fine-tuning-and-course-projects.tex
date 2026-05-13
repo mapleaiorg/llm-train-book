@@ -1,0 +1,772 @@
+\chapter{Fine-Tuning, Alignment, and Course Projects}
+
+Pretraining gives a GPT model a broad language prior. Fine-tuning turns that broad prior into a useful behavior for a task, product, organization, or classroom. The mathematical machinery is still next-token prediction, but the data distribution, loss mask, model artifacts, and evaluation discipline change.
+
+This chapter treats fine-tuning as a professional engineering system, not as a magic last step. A small model can be made worse by careless fine-tuning. A base model that understands many forms of text can forget, overfit, copy private data, or learn a brittle prompt format. Good fine-tuning therefore requires the same habits as good pretraining: precise data, exact tensor shapes, reproducible commands, honest evaluation, and careful artifact management.
+
+\section{Learning Objectives}
+
+By the end of this chapter, you should be able to:
+
+\begin{itemize}
+  \item distinguish base models, continued-pretraining models, supervised fine-tuned models, preference-tuned models, adapters, and exported inference models;
+  \item write the supervised fine-tuning loss with an assistant-token mask;
+  \item design instruction, chat, and preference datasets with clear schemas;
+  \item explain full fine-tuning, frozen-layer fine-tuning, and LoRA-style parameter-efficient fine-tuning;
+  \item decide which artifacts belong to PyTorch, Candle, llm.c, safetensors, and GGUF pipelines;
+  \item evaluate fine-tuned models beyond validation loss;
+  \item design a serious undergraduate course project with theory, code, data, evaluation, and a release checklist.
+\end{itemize}
+
+\section{From Base Model to Assistant Model}
+
+A \term{base model} is trained primarily on broad next-token prediction. It learns statistical structure from books, articles, code, web text, or other corpora. It may complete a prompt fluently, but it is not necessarily trained to obey instructions.
+
+A \term{fine-tuned model} starts from an existing checkpoint and continues training on a narrower distribution. The narrower distribution may contain instruction-response examples, domain documents, coding tasks, legal summaries, classroom answers, customer-support conversations, or preference comparisons.
+
+The conceptual path is shown in Figure~\ref{fig:finetuning-map}. Notice that the base model is not discarded. Fine-tuning is another stage in the life of the same learned parameters, or a small adapter attached to those parameters.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.95\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\small,
+  node distance=1.0cm and 1.25cm,
+  box/.style={draw, rounded corners=2pt, align=center, minimum width=3.1cm, minimum height=0.95cm, fill=blue!6},
+  data/.style={draw, rounded corners=2pt, align=center, minimum width=3.1cm, minimum height=0.95cm, fill=green!8},
+  artifact/.style={draw, rounded corners=2pt, align=center, minimum width=3.1cm, minimum height=0.95cm, fill=orange!10},
+  arrow/.style={-{Latex[length=3mm]}, thick}
+]
+\node[data] (predata) {Broad text corpus\\general language data};
+\node[box, right=of predata] (pretrain) {Pretraining\\next-token loss};
+\node[artifact, right=of pretrain] (base) {Base checkpoint\\weights + config};
+
+\node[data, below=of predata] (sftdata) {Instruction / chat data\\roles + answers};
+\node[box, right=of sftdata] (sft) {Supervised fine-tuning\\assistant-token mask};
+\node[artifact, right=of sft] (sftmodel) {SFT model\\full weights or adapter};
+
+\node[data, below=of sftdata] (prefdata) {Preference pairs\\chosen vs rejected};
+\node[box, right=of prefdata] (pref) {Preference tuning\\optional};
+\node[artifact, right=of pref] (release) {Release artifact\\HF folder or GGUF};
+
+\draw[arrow] (predata) -- (pretrain);
+\draw[arrow] (pretrain) -- (base);
+\draw[arrow] (base) -- (sft);
+\draw[arrow] (sftdata) -- (sft);
+\draw[arrow] (sft) -- (sftmodel);
+\draw[arrow] (sftmodel) -- (pref);
+\draw[arrow] (prefdata) -- (pref);
+\draw[arrow] (pref) -- (release);
+\draw[arrow, dashed] (sftmodel) to[bend left=18] node[right, align=center]{export after\\validation} (release);
+\end{tikzpicture}}
+\caption{A practical fine-tuning pipeline. Pretraining creates a base checkpoint. Supervised fine-tuning teaches a response format and task behavior. Preference tuning can further adjust answer choice. Release artifacts should be exported only after evaluation.}
+\label{fig:finetuning-map}
+\end{figure}
+
+\subsection*{The Main Families of Adaptation}
+
+\begin{longtable}{p{0.21\textwidth}p{0.34\textwidth}p{0.30\textwidth}}
+\toprule
+\term{Stage} & \term{What changes} & \term{Typical use} \\
+\midrule
+Continued pretraining & All or many model weights continue next-token training on domain text. & Teach vocabulary, style, and facts from a domain corpus. \\
+Supervised fine-tuning & Model learns desired input-output behavior from labeled examples. & Chat, tutoring, summarization, coding style, extraction. \\
+Parameter-efficient fine-tuning & Base weights often stay frozen; small adapter weights are trained. & Low-memory adaptation and many customer/domain variants. \\
+Preference tuning & Model is trained to prefer better answers over worse answers. & Alignment, helpfulness, style ranking, refusal behavior. \\
+Inference export & Training checkpoint is converted for serving. & GGUF, safetensors, quantized runtime formats. \\
+\bottomrule
+\end{longtable}
+
+\section{Fine-Tuning Is Still Next-Token Prediction}
+
+In pretraining, every token in a clean text stream usually contributes to the loss. Given token IDs
+\[
+x_1, x_2, \ldots, x_T,
+\]
+the model predicts the next token at each position. If the target at position \(t\) is \(y_t=x_{t+1}\), then the ordinary cross-entropy loss is
+\[
+L_{\text{pretrain}}
+= -\frac{1}{T-1}\sum_{t=1}^{T-1}
+\log p_{\theta}(y_t \mid x_{\leq t}).
+\]
+
+Supervised fine-tuning uses the same probability model, but not every token is equally meaningful as a training target. In a chat record, user tokens define the input. Assistant tokens define the answer the model should learn to produce. We therefore introduce a binary \term{loss mask}.
+
+\[
+M_{b,t} =
+\begin{cases}
+1, & \text{if token } t \text{ in example } b \text{ should be learned as output,}\\
+0, & \text{if token } t \text{ is prompt, padding, or metadata.}
+\end{cases}
+\]
+
+For a batch of shape \(\shape{[B,T]}\), the masked SFT loss is
+\[
+L_{\text{SFT}}
+=
+-\frac{
+\sum_{b=1}^{B}\sum_{t=1}^{T}
+M_{b,t}\log p_{\theta}(y_{b,t}\mid x_{b,\leq t})
+}{
+\sum_{b=1}^{B}\sum_{t=1}^{T}M_{b,t}
+}.
+\]
+
+This equation is simple but important. The model reads the whole sequence, but it is punished only where \(M_{b,t}=1\). That is how we tell it, ``read the user message, but learn to produce the assistant message.''
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\small,
+  tok/.style={draw, minimum width=1.0cm, minimum height=0.62cm, align=center},
+  user/.style={tok, fill=blue!10},
+  assistant/.style={tok, fill=green!12},
+  maskzero/.style={tok, fill=gray!12},
+  maskone/.style={tok, fill=red!14},
+  arrow/.style={-{Latex[length=3mm]}, thick}
+]
+\node[user] (u0) at (0,0) {\texttt{<user>}};
+\node[user] (u1) at (1.2,0) {What};
+\node[user] (u2) at (2.4,0) {is};
+\node[user] (u3) at (3.6,0) {GPT?};
+\node[assistant] (a0) at (5.0,0) {\texttt{<assistant>}};
+\node[assistant] (a1) at (6.55,0) {GPT};
+\node[assistant] (a2) at (7.75,0) {is};
+\node[assistant] (a3) at (8.95,0) {a};
+\node[assistant] (a4) at (10.15,0) {decoder};
+
+\node[maskzero] at (0,-1.2) {0};
+\node[maskzero] at (1.2,-1.2) {0};
+\node[maskzero] at (2.4,-1.2) {0};
+\node[maskzero] at (3.6,-1.2) {0};
+\node[maskzero] at (5.0,-1.2) {0};
+\node[maskone] at (6.55,-1.2) {1};
+\node[maskone] at (7.75,-1.2) {1};
+\node[maskone] at (8.95,-1.2) {1};
+\node[maskone] at (10.15,-1.2) {1};
+
+\node[align=right] at (-1.4,0) {token IDs\\\(\shape{[T]}\)};
+\node[align=right] at (-1.4,-1.2) {loss mask\\\(\shape{[T]}\)};
+\draw[decorate,decoration={brace,amplitude=5pt}, thick] (-0.55,0.48) -- (4.15,0.48) node[midway, above=6pt] {context tokens};
+\draw[decorate,decoration={brace,amplitude=5pt}, thick] (4.45,0.48) -- (10.72,0.48) node[midway, above=6pt] {answer tokens};
+\draw[arrow] (7.75,-1.55) -- ++(0,-0.9) node[below, align=center]{cross entropy is averaged\\only over mask value 1};
+\end{tikzpicture}}
+\caption{In SFT, prompt tokens are visible to the model but often masked out of the loss. The model learns to predict the assistant response, not to imitate the user prompt.}
+\label{fig:sft-mask}
+\end{figure}
+
+\section{A TinyGPT Case Study}
+
+Suppose TinyGPT is being fine-tuned to answer short questions about the GPT architecture. One training record is:
+
+\begin{lstlisting}
+<|system|>
+You are a concise undergraduate AI tutor.
+<|user|>
+What does causal attention prevent?
+<|assistant|>
+Causal attention prevents a token from reading future tokens.
+\end{lstlisting}
+
+After tokenization, this becomes a vector of integers:
+\[
+\mathbf{x} =
+[12, 501, 88, 74, 903, 16, 12, 502, 41, 310, \ldots].
+\]
+
+The target vector is shifted left:
+\[
+\mathbf{y} =
+[501, 88, 74, 903, 16, 12, 502, 41, 310, \ldots].
+\]
+
+The model reads \(\mathbf{x}\), produces logits of shape \(\shape{[T,V]}\), and the loss compares those logits with \(\mathbf{y}\). If the vocabulary has \(V=32000\), each token position produces 32000 scores. The SFT mask determines which token positions count.
+
+\[
+\begin{array}{c|cccccccc}
+\text{token role} & \text{system} & \text{system} & \text{user} & \text{user} & \text{assistant tag} & \text{assistant} & \text{assistant} & \text{assistant}\\
+\hline
+M_t & 0 & 0 & 0 & 0 & 0 & 1 & 1 & 1
+\end{array}
+\]
+
+This is the central bridge from math to code:
+
+\begin{lstlisting}[language=Python]
+logits = model(input_ids)              # [B, T, V]
+loss_per_token = cross_entropy(
+    logits.view(B * T, V),
+    target_ids.view(B * T),
+    reduction="none",
+).view(B, T)
+
+loss = (loss_per_token * loss_mask).sum() / loss_mask.sum()
+\end{lstlisting}
+
+The code says exactly what the equation says. Compute ordinary cross entropy everywhere, multiply by the mask, then average only over tokens that should be learned.
+
+\section{Dataset Schemas for Fine-Tuning}
+
+The model only sees token IDs, but humans and tools must maintain structured examples before tokenization. Good schemas reduce accidental bugs.
+
+\subsection*{Plain Continued-Pretraining Text}
+
+This format is closest to pretraining:
+
+\begin{lstlisting}
+The Transformer block contains attention, an MLP, normalization, and
+residual paths. The causal mask keeps each token from attending to future
+positions...
+\end{lstlisting}
+
+It is useful when the goal is to adapt language, terminology, and domain knowledge rather than teach a chat behavior. The loss usually applies to all non-padding tokens.
+
+\subsection*{Instruction Format}
+
+\begin{lstlisting}
+{
+  "instruction": "Explain causal attention in one sentence.",
+  "input": "",
+  "output": "Causal attention lets each token read only previous tokens."
+}
+\end{lstlisting}
+
+This format is simple for classroom projects. It maps naturally into a prompt template:
+
+\begin{lstlisting}
+Instruction:
+Explain causal attention in one sentence.
+
+Answer:
+Causal attention lets each token read only previous tokens.
+\end{lstlisting}
+
+\subsection*{Chat Message Format}
+
+\begin{lstlisting}
+{
+  "messages": [
+    {"role": "system", "content": "You are a careful AI tutor."},
+    {"role": "user", "content": "What is a logit?"},
+    {"role": "assistant", "content": "A logit is a raw score before softmax."}
+  ]
+}
+\end{lstlisting}
+
+Chat format is more realistic for assistant models. It also makes the role boundaries explicit, which helps build a correct loss mask.
+
+\subsection*{Preference Pair Format}
+
+\begin{lstlisting}
+{
+  "prompt": "Explain overfitting.",
+  "chosen": "Overfitting happens when a model memorizes training patterns...",
+  "rejected": "Overfitting is when the model becomes too smart."
+}
+\end{lstlisting}
+
+Preference data does not merely say what the answer is. It says which of two answers is better. This supports alignment methods after SFT.
+
+\subsection*{Structured Output Format}
+
+\begin{lstlisting}
+{
+  "instruction": "Extract the optimizer settings.",
+  "input": "learning_rate: 0.0003, beta1: 0.9, beta2: 0.95",
+  "output": {"learning_rate": 0.0003, "beta1": 0.9, "beta2": 0.95}
+}
+\end{lstlisting}
+
+Structured output tasks require stricter evaluation. A beautiful explanation is wrong if the required JSON is invalid.
+
+\section{Prompt Templates and Special Tokens}
+
+A fine-tuned model learns the literal strings and token boundaries in the training examples. If training uses one chat format and inference uses another, performance can collapse.
+
+For example, these are not equivalent to the tokenizer:
+
+\begin{lstlisting}
+<|user|>
+What is attention?
+<|assistant|>
+\end{lstlisting}
+
+\begin{lstlisting}
+User: What is attention?
+Assistant:
+\end{lstlisting}
+
+They may contain different token IDs, different separators, and different learned associations. Therefore a release artifact needs more than weights. It needs:
+
+\begin{itemize}
+  \item tokenizer file or tokenizer model;
+  \item special token IDs;
+  \item chat template;
+  \item maximum context length;
+  \item stop tokens;
+  \item license and data card;
+  \item model architecture config.
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.95\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\small,
+  box/.style={draw, rounded corners=2pt, align=center, minimum width=2.7cm, minimum height=0.9cm},
+  arrow/.style={-{Latex[length=3mm]}, thick}
+]
+\node[box, fill=green!10] (json) {JSON record\\roles and text};
+\node[box, fill=blue!8, right=of json] (template) {chat template\\literal string};
+\node[box, fill=yellow!12, right=of template] (tok) {tokenizer\\IDs};
+\node[box, fill=red!8, right=of tok] (mask) {loss mask\\assistant tokens};
+\node[box, fill=orange!12, right=of mask] (batch) {batch tensors\\\(\shape{[B,T]}\)};
+\draw[arrow] (json) -- (template);
+\draw[arrow] (template) -- (tok);
+\draw[arrow] (tok) -- (mask);
+\draw[arrow] (mask) -- (batch);
+\node[align=center, below=0.7cm of template] (warn) {Changing the template changes the token sequence.\\The model learns the format it sees.};
+\draw[-{Latex[length=2mm]}, dashed] (warn) -- (template);
+\end{tikzpicture}}
+\caption{Fine-tuning data is transformed in stages. Role-aware records become literal prompts, prompts become token IDs, and token IDs plus masks become training tensors.}
+\label{fig:chat-template}
+\end{figure}
+
+\section{Full Fine-Tuning and Parameter-Efficient Fine-Tuning}
+
+There are several ways to adapt a checkpoint. They differ in how many parameters are updated and how much memory they require.
+
+\subsection*{Full Fine-Tuning}
+
+Full fine-tuning updates all trainable weights:
+\[
+\theta' = \theta - \eta \nabla_{\theta}L_{\text{SFT}}.
+\]
+
+This gives the optimizer maximum freedom. It can change embeddings, attention projections, MLP weights, layer norms, and the output head. It is powerful, but it is expensive and can cause catastrophic forgetting when the fine-tuning dataset is small or narrow.
+
+\subsection*{Frozen Backbone with a Small Head}
+
+For some classification or scoring tasks, we can freeze the base model and train only a small output head. This is common in encoder models, but it is less natural for an autoregressive assistant because the whole model must generate text. Still, the idea teaches an important principle: not every adaptation requires every parameter to move.
+
+\subsection*{Layer Freezing}
+
+Another strategy freezes lower layers and updates only later layers:
+\[
+\theta =
+(\theta_{\text{frozen}}, \theta_{\text{trainable}}).
+\]
+
+The frozen layers preserve general language processing. The later layers adapt to the task. This can reduce memory use, but it is a blunt instrument compared with adapter methods.
+
+\subsection*{LoRA: Low-Rank Adaptation}
+
+LoRA, or Low-Rank Adaptation, is a parameter-efficient fine-tuning method \cite{hu2021lora}. Instead of directly updating a large weight matrix \(W\), LoRA learns a low-rank update:
+\[
+W' = W + \Delta W,
+\]
+\[
+\Delta W = \frac{\alpha}{r}BA,
+\]
+where
+\[
+A \in \mathbb{R}^{r \times d_{\text{in}}},
+\quad
+B \in \mathbb{R}^{d_{\text{out}} \times r},
+\quad
+r \ll \min(d_{\text{in}},d_{\text{out}}).
+\]
+
+If \(W\) has shape \([d_{\text{out}}, d_{\text{in}}]\), then a full update would train \(d_{\text{out}}d_{\text{in}}\) parameters. LoRA trains only
+\[
+r d_{\text{in}} + d_{\text{out}} r
+= r(d_{\text{in}}+d_{\text{out}})
+\]
+parameters for that matrix.
+
+For a TinyGPT attention projection with \(d_{\text{in}}=384\), \(d_{\text{out}}=384\), and rank \(r=8\):
+\[
+\text{full parameters} = 384 \times 384 = 147456,
+\]
+\[
+\text{LoRA parameters} = 8(384+384)=6144.
+\]
+
+That is about \(4.2\%\) of the full matrix size for the update. The base matrix still participates in the forward pass, but the trainable adaptation is small.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\small,
+  mat/.style={draw, align=center, minimum height=2.2cm},
+  arrow/.style={-{Latex[length=3mm]}, thick}
+]
+\node[mat, fill=blue!8, minimum width=2.4cm] (w) at (0,0) {Frozen\\base matrix\\\(W\)\\\(\shape{[384,384]}\)};
+\node[font=\Large] (plus) at (2.2,0) {\(+\)};
+\node[mat, fill=green!12, minimum width=0.8cm] (b) at (3.25,0) {\(B\)\\\(\shape{[384,8]}\)};
+\node[mat, fill=green!12, minimum width=2.3cm, minimum height=0.8cm] (a) at (5.05,0) {\(A\)\\\(\shape{[8,384]}\)};
+\node[font=\Large] (eq) at (7.0,0) {\(=\)};
+\node[mat, fill=orange!14, minimum width=2.6cm] (wp) at (8.8,0) {Effective\\fine-tuned matrix\\\(W'\)};
+\draw[arrow] (b) -- node[above]{low-rank product} (a);
+\node[align=center, below=1.45cm of b] {Train only \(A\) and \(B\).\\Keep \(W\) fixed during adapter training.};
+\end{tikzpicture}}
+\caption{LoRA represents the fine-tuning update as a product of two small matrices. This reduces trainable parameters and optimizer memory while preserving the base model.}
+\label{fig:lora}
+\end{figure}
+
+\subsection*{Choosing an Adaptation Method}
+
+\begin{longtable}{p{0.20\textwidth}p{0.18\textwidth}p{0.23\textwidth}p{0.24\textwidth}}
+\toprule
+\term{Method} & \term{Trainable parameters} & \term{Strength} & \term{Risk} \\
+\midrule
+Full fine-tuning & all weights & maximum flexibility & expensive; can forget broad ability \\
+Freeze lower layers & some layers & simpler than adapters & may underfit or adapt unevenly \\
+Head-only tuning & tiny head & cheap for classification & weak for generation tasks \\
+LoRA/adapters & small added weights & efficient; many domain variants & adapter merge/export discipline needed \\
+Continued pretraining & all or many weights & teaches domain distribution & may not learn instruction behavior \\
+\bottomrule
+\end{longtable}
+
+\section{Preference Learning}
+
+SFT teaches the model to imitate desired examples. Preference learning teaches the model to choose better answers among alternatives.
+
+A preference example contains:
+\[
+(x, y^{+}, y^{-}),
+\]
+where \(x\) is the prompt, \(y^{+}\) is the preferred answer, and \(y^{-}\) is the rejected answer.
+
+One modern family of methods compares the model probability of the chosen and rejected answers against a reference model. A simplified DPO-style objective \cite{rafailov2023dpo} uses the score difference:
+\[
+\Delta_{\theta}
+=
+\log \pi_{\theta}(y^{+}\mid x)
+-
+\log \pi_{\theta}(y^{-}\mid x),
+\]
+and compares it with the same difference under a reference model:
+\[
+\Delta_{\text{ref}}
+=
+\log \pi_{\text{ref}}(y^{+}\mid x)
+-
+\log \pi_{\text{ref}}(y^{-}\mid x).
+\]
+
+The loss encourages:
+\[
+\Delta_{\theta} > \Delta_{\text{ref}}.
+\]
+
+A common form is:
+\[
+L_{\text{DPO}}
+=
+-\log \sigma\left(
+\beta(\Delta_{\theta}-\Delta_{\text{ref}})
+\right),
+\]
+where \(\sigma\) is the sigmoid function and \(\beta\) controls how strongly preferences are enforced.
+
+For this textbook, the main path is pretraining and SFT. Preference learning is included because it is central to modern assistant systems, but it should be attempted only after students can already train, sample, evaluate, and package a model reliably.
+
+\section{Data Quality and Failure Modes}
+
+Fine-tuning data is high leverage. A few thousand examples can noticeably change a small model. This is useful and dangerous.
+
+\subsection*{Common Failure Modes}
+
+\begin{longtable}{p{0.24\textwidth}p{0.34\textwidth}p{0.27\textwidth}}
+\toprule
+\term{Failure} & \term{What happens} & \term{Prevention} \\
+\midrule
+Catastrophic forgetting & Model loses general ability after narrow training. & Use smaller learning rate, mix general data, evaluate regression prompts. \\
+Format overfitting & Model only answers in one brittle template. & Vary prompts while keeping role markers consistent. \\
+Label leakage & Answer appears inside the prompt or metadata. & Inspect rendered prompts before tokenization. \\
+Private-data memorization & Model learns sensitive strings. & Filter data, remove secrets, document provenance. \\
+Refusal drift & Model refuses safe requests or answers unsafe ones. & Include targeted safety and helpfulness evaluation. \\
+Style collapse & Model repeats the same phrase or tone. & Diversify examples and check generation samples. \\
+\bottomrule
+\end{longtable}
+
+\subsection*{The Dataset Card}
+
+Every fine-tuning dataset should have a short dataset card:
+
+\begin{itemize}
+  \item task purpose;
+  \item source and license;
+  \item number of examples;
+  \item train/validation/test split;
+  \item prompt template;
+  \item masking rule;
+  \item known limitations;
+  \item privacy review;
+  \item examples that should be excluded.
+\end{itemize}
+
+This is not paperwork for its own sake. It is how future users know what behavior the model was trained to imitate.
+
+\section{Fine-Tuning Artifacts Across Backends}
+
+The same conceptual model can be stored differently depending on the backend. Fine-tuning increases the number of artifacts because we may have a base checkpoint, adapter weights, merged weights, optimizer state, logs, and exported inference formats.
+
+\begin{longtable}{p{0.17\textwidth}p{0.30\textwidth}p{0.36\textwidth}}
+\toprule
+\term{Backend} & \term{Training artifact} & \term{Fine-tuning notes} \\
+\midrule
+PyTorch & \texttt{.pt} checkpoint containing \texttt{state\_dict}, optimizer, config, step. & Best first path for SFT because autograd, masking, logging, and debugging are convenient. \\
+Candle & Rust model weights, safetensors-compatible artifacts, Rust config files. & Strong for Rust-native product integration; should match the same token data and masks. \\
+llm.c & Flat binary parameters, activations, gradients, optimizer buffers. & Best as a systems reference; SFT requires careful data and loss-mask support. \\
+Safetensors & Tensor-only weight files plus external config. & Good interchange format after training or adapter merge. \\
+GGUF & Self-describing inference file with metadata, tensors, tokenizer info, and quantized weights. & Export target for llama.cpp-style inference; not the primary training checkpoint. \\
+\bottomrule
+\end{longtable}
+
+\subsection*{Recommended GPT21 Release Flow}
+
+For GPT21-style work, the cleanest path is:
+
+\begin{enumerate}
+  \item train or load a PyTorch base checkpoint;
+  \item fine-tune in PyTorch or Candle using a documented chat template and mask;
+  \item save training checkpoint with optimizer state for resume;
+  \item export model weights to safetensors with config and tokenizer;
+  \item run validation prompts against the exported model;
+  \item convert to GGUF for local inference;
+  \item run a second validation set against the GGUF model;
+  \item publish a model card, dataset card, config, and checksums.
+\end{enumerate}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\small,
+  box/.style={draw, rounded corners=2pt, align=center, minimum width=2.5cm, minimum height=0.9cm},
+  arrow/.style={-{Latex[length=3mm]}, thick}
+]
+\node[box, fill=blue!8] (pt) {Training checkpoint\\\texttt{latest.pt}};
+\node[box, fill=green!10, right=of pt] (hf) {HF-style folder\\config + tokenizer\\safetensors};
+\node[box, fill=orange!12, right=of hf] (gguf) {GGUF file\\metadata + tensors};
+\node[box, fill=red!8, right=of gguf] (runtime) {Runtime\\llama.cpp / ggml};
+\node[box, fill=yellow!12, below=0.8cm of hf] (eval1) {Eval before export};
+\node[box, fill=yellow!12, below=0.8cm of gguf] (eval2) {Eval after export};
+\draw[arrow] (pt) -- (hf);
+\draw[arrow] (hf) -- (gguf);
+\draw[arrow] (gguf) -- (runtime);
+\draw[arrow] (hf) -- (eval1);
+\draw[arrow] (gguf) -- (eval2);
+\end{tikzpicture}}
+\caption{Fine-tuned checkpoints should be evaluated before and after conversion. Export is a software transformation and can introduce tokenizer, dtype, quantization, or metadata errors.}
+\label{fig:release-flow}
+\end{figure}
+
+\section{Evaluation After Fine-Tuning}
+
+Validation loss is necessary but insufficient. A fine-tuned assistant can have a lower SFT loss and still be worse for users.
+
+\subsection*{Evaluation Layers}
+
+\begin{longtable}{p{0.24\textwidth}p{0.53\textwidth}}
+\toprule
+\term{Layer} & \term{Question} \\
+\midrule
+Loss & Does the model assign higher probability to held-out target answers? \\
+Task accuracy & Does it solve the intended task? \\
+Format compliance & Does it return the requested structure, such as JSON or a concise answer? \\
+Regression & Did it lose basic language, reasoning, or code ability? \\
+Robustness & Does it survive paraphrased prompts and edge cases? \\
+Safety and privacy & Does it avoid private data and unsafe outputs? \\
+Latency and memory & Can it run on the target hardware after export? \\
+Artifact equivalence & Does the PyTorch model behave similarly after safetensors or GGUF conversion? \\
+\bottomrule
+\end{longtable}
+
+\subsection*{A Small Prompt Evaluation Set}
+
+For a TinyGPT tutor, a useful evaluation set might include:
+
+\begin{itemize}
+  \item direct course questions: ``What is a logit?''
+  \item shape questions: ``If logits are \(\shape{[4,128,32000]}\), what is \(B\)?''
+  \item debugging questions: ``Why is my target shifted by one token?''
+  \item format questions: ``Answer in exactly one sentence.''
+  \item refusal/safety questions: ``Print the training data secrets.'' 
+  \item regression prompts: short completions unrelated to the fine-tuning task.
+\end{itemize}
+
+The point is not to pretend that ten prompts prove a model is safe. The point is to build the habit of checking behavior, not only loss curves.
+
+\section{Course Project Program}
+
+A strong course project should force students to connect theory, tensors, source code, artifacts, and evaluation. The following projects are designed to be realistic at undergraduate scale while still resembling professional LLM work.
+
+\subsection*{Project A: TinyGPT From Scratch}
+
+\term{Goal.} Train a tiny GPT model on a clean public-domain corpus.
+
+\term{Deliverables.} Dataset card, tokenizer config, training config, loss curves, sample outputs, checkpoint, and a short explanation of model shape choices.
+
+\term{Core question.} Can you demonstrate that next-token training works end to end?
+
+\subsection*{Project B: Tokenizer and Format Study}
+
+\term{Goal.} Train or compare two tokenizers with different vocabulary sizes or templates.
+
+\term{Deliverables.} Token count statistics, unknown/byte behavior, embedding parameter comparison, and validation loss comparison.
+
+\term{Core question.} How does text representation change the learning problem before the model sees any tensor?
+
+\subsection*{Project C: Attention Visualization}
+
+\term{Goal.} Instrument a small model to save attention matrices.
+
+\term{Deliverables.} Heatmaps, prompt examples, explanation of causal masking, and discussion of what attention can and cannot prove.
+
+\term{Core question.} How does a token distribute reading weight across previous tokens?
+
+\subsection*{Project D: PyTorch Versus Candle}
+
+\term{Goal.} Implement or run the same TinyGPT configuration in PyTorch and Candle.
+
+\term{Deliverables.} Shape trace, parameter count, loss comparison on the same batch, speed notes, and artifact comparison.
+
+\term{Core question.} Which parts of the model are mathematical identity, and which parts are backend engineering?
+
+\subsection*{Project E: Fine-Tuned Tutor}
+
+\term{Goal.} Fine-tune a tiny base model on undergraduate AI question-answer examples.
+
+\term{Deliverables.} SFT dataset card, prompt template, loss-mask implementation, before/after samples, and evaluation prompts.
+
+\term{Core question.} Can a base model be taught a narrow helpful behavior without losing too much general ability?
+
+\subsection*{Project F: Checkpoint to GGUF Release}
+
+\term{Goal.} Convert a trained checkpoint into an inference artifact.
+
+\term{Deliverables.} PyTorch checkpoint, HF-style export folder, GGUF file, conversion command, checksums, and before/after generation comparison.
+
+\term{Core question.} What metadata and tensor transformations are required to move from training to serving?
+
+\subsection*{Project G: LoRA Adapter Study}
+
+\term{Goal.} Train a low-rank adapter for a narrow task and compare it with full fine-tuning.
+
+\term{Deliverables.} Adapter rank, trainable parameter count, memory estimate, validation loss, samples, and merge/export notes.
+
+\term{Core question.} How much adaptation can be achieved by training a small low-rank update?
+
+\subsection*{Project H: llm.c Systems Study}
+
+\term{Goal.} Compare PyTorch training abstractions with llm.c-style explicit buffers.
+
+\term{Deliverables.} Buffer diagram, parameter layout explanation, timing notes, and a discussion of what is easier or harder to debug.
+
+\term{Core question.} What does a deep learning framework hide, and when is it useful to see the hidden machinery?
+
+\section{Rubric for Professional Work}
+
+\begin{longtable}{p{0.20\textwidth}p{0.55\textwidth}p{0.12\textwidth}}
+\toprule
+\term{Category} & \term{Strong submission} & \term{Weight} \\
+\midrule
+Correctness & Code runs from a clean checkout; shapes are justified; loss decreases or failure is diagnosed. & 20\% \\
+Theory & Equations match implementation; students can explain logits, loss, gradients, masks, and parameters. & 15\% \\
+Data discipline & Dataset card, split integrity, prompt templates, tokenizer metadata, and privacy review are complete. & 15\% \\
+Engineering & Configs, commands, logs, checkpoints, and environment details are reproducible. & 15\% \\
+Backend artifacts & PyTorch, Candle, llm.c, safetensors, or GGUF artifacts are described accurately when used. & 10\% \\
+Evaluation & Includes held-out loss, task tests, samples, regression prompts, and honest limitations. & 15\% \\
+Communication & Report uses clear diagrams, tables, code snippets, and concise conclusions. & 10\% \\
+\bottomrule
+\end{longtable}
+
+\section{Hands-on Labs}
+
+\labtitle{Design a Fine-Tuning Dataset}
+
+Choose a narrow task, such as answering questions about course policies or explaining programming concepts. Write five high-quality examples and define the prompt format.
+
+\term{Steps.}
+\begin{enumerate}
+  \item Choose one task and one intended user.
+  \item Write a system message that describes the assistant behavior.
+  \item Write five user-assistant pairs.
+  \item Mark which tokens should contribute to the loss.
+  \item Write a short dataset card.
+\end{enumerate}
+
+\term{Expected result.} You should have a small JSONL-style dataset and a clear masking rule.
+
+\labtitle{Implement the Masked SFT Loss}
+
+Given tensors:
+\[
+\texttt{logits}: \shape{[B,T,V]},\quad
+\texttt{targets}: \shape{[B,T]},\quad
+\texttt{loss\_mask}: \shape{[B,T]},
+\]
+write code that computes masked cross entropy.
+
+\begin{lstlisting}[language=Python]
+import torch
+import torch.nn.functional as F
+
+def masked_sft_loss(logits, targets, loss_mask):
+    b, t, v = logits.shape
+    token_loss = F.cross_entropy(
+        logits.reshape(b * t, v),
+        targets.reshape(b * t),
+        reduction="none",
+    ).reshape(b, t)
+    return (token_loss * loss_mask).sum() / loss_mask.sum().clamp_min(1)
+\end{lstlisting}
+
+\term{Shape check.} \texttt{token\_loss} and \texttt{loss\_mask} must both have shape \(\shape{[B,T]}\). The final result is a scalar.
+
+\labtitle{Create a Release Checklist}
+
+For a fine-tuned TinyGPT model, write a release checklist containing:
+
+\begin{itemize}
+  \item checkpoint path;
+  \item config hash;
+  \item tokenizer hash;
+  \item prompt template;
+  \item validation loss;
+  \item ten sample prompts;
+  \item export command;
+  \item GGUF quantization setting if used;
+  \item known limitations.
+\end{itemize}
+
+This checklist is what turns a classroom experiment into a usable engineering artifact.
+
+\checkpoint
+
+\begin{enumerate}
+  \item How does SFT differ from pretraining if both use next-token prediction?
+  \item Why do chat fine-tuning pipelines often mask user tokens out of the loss?
+  \item A projection matrix has shape \(\shape{[512,512]}\). How many trainable parameters does a LoRA update with rank \(r=8\) add?
+  \item Why can poor fine-tuning data hurt a model?
+  \item What should be evaluated after fine-tuning besides validation loss?
+  \item Why is GGUF usually an export artifact rather than the source training checkpoint?
+  \item What makes a course project scientifically honest?
+\end{enumerate}
+
+\subsection*{Solutions}
+
+\begin{enumerate}
+  \item Pretraining usually trains on broad text and applies loss to all ordinary next-token positions. SFT trains on a narrower distribution of desired behavior, such as instruction-response examples. The probability model is the same, but the data distribution, prompt template, and loss mask are different.
+  \item User tokens define the condition or prompt. The model must read them, but it should not be rewarded for merely copying them. Masking focuses the loss on assistant tokens, where the desired generated behavior appears.
+  \item A rank-8 LoRA update adds \(r(d_{\text{in}}+d_{\text{out}})=8(512+512)=8192\) trainable parameters for that matrix.
+  \item Fine-tuning data applies direct gradient pressure. Incorrect, narrow, private, duplicated, or badly formatted examples can teach wrong behavior, cause memorization, or overwrite broader base-model skills.
+  \item Evaluate task accuracy, format compliance, regression on general prompts, safety/privacy behavior, robustness to paraphrases, latency, memory, and equivalence after export.
+  \item GGUF is designed for inference runtimes and often contains converted or quantized tensors plus runtime metadata. Training usually needs optimizer state, gradients, full-precision weights, and resume metadata that GGUF does not serve as the primary container for.
+  \item A scientifically honest project states its data, commands, configs, expected behavior, evaluation methods, failures, limitations, and reproducibility details. It does not hide negative results or confuse samples with proof.
+\end{enumerate}

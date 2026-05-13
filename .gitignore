@@ -1,0 +1,21 @@
+.DS_Store
+
+# LaTeX build output
+build/
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.run.xml
+*.toc
+*.xdv
+*.synctex.gz
+
+# Local editor files
+.vscode/
+.idea/
+*.swp

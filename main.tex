@@ -1,0 +1,118 @@
+\documentclass[11pt,oneside]{book}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{booktabs,longtable,array}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{xurl}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{caption}
+\usepackage{fancyvrb}
+\usepackage{listings}
+\usepackage{tikz}
+\usepackage{microtype}
+\usetikzlibrary{arrows.meta,positioning,fit,shapes.geometric,calc,decorations.pathreplacing}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!50!black,
+  citecolor=blue!50!black,
+  urlcolor=blue!60!black,
+  pdftitle={Training LLMs From Scratch},
+  pdfauthor={MapleAI Intelligence Inc.}
+}
+
+\definecolor{codebg}{RGB}{248,248,248}
+\definecolor{maplered}{RGB}{183,53,45}
+\definecolor{mapleblue}{RGB}{30,82,145}
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  frame=single,
+  breaklines=true,
+  columns=fullflexible
+}
+
+\setlist[itemize]{leftmargin=1.4em}
+\setlist[enumerate]{leftmargin=1.6em}
+\setlength{\parskip}{0.35em}
+\setlength{\parindent}{0pt}
+
+\newcommand{\term}[1]{\textbf{#1}}
+\newcommand{\shape}[1]{\texttt{#1}}
+\newcommand{\labtitle}[1]{\subsection*{Hands-on Lab: #1}}
+\newcommand{\checkpoint}{\subsection*{Checkpoint Questions}}
+\newcommand{\engineering}{\subsection*{Engineering Practice}}
+
+\title{Training Large Language Models From Scratch\\\large An Undergraduate Textbook for Theory, Engineering, and Hands-on Practice}
+\author{MapleAI Intelligence Inc.}
+\date{Draft v1.0}
+
+\begin{document}
+
+\frontmatter
+\maketitle
+\tableofcontents
+
+\chapter*{Preface}
+This book is written for undergraduate students meeting artificial intelligence and large language models for the first time. It assumes comfort with introductory programming and basic algebra, but it does not assume prior deep learning experience. The goal is not only to explain what a GPT-style language model is, but to make the reader capable of training a small one from scratch, reading the code with confidence, and understanding the engineering tradeoffs behind larger systems.
+
+The book is original MapleAI instructional material. It is informed by the public scientific literature and by well-known open-source implementations, but it is organized as a standalone textbook for the \texttt{llm-train} project. The emphasis is on clear definitions, mathematical derivations, shape reasoning, practical labs, and disciplined engineering.
+
+\chapter*{How To Use This Book}
+The chapters are intentionally named by topic instead of by inherited source numbers. A student can read the book front to back, while an instructor can assign each part as a module:
+
+\begin{itemize}
+  \item Part I builds mathematical and data foundations.
+  \item Part II constructs the GPT model from tensors, embeddings, attention, and Transformer blocks.
+  \item Part III trains, evaluates, and samples from a model.
+  \item Part IV explains systems backends, course projects, and professional practice.
+\end{itemize}
+
+Each chapter contains three layers: theory, engineering practice, and hands-on labs. The labs are designed to be run on small hardware first. A good training culture begins with tiny models that fail fast, reveal bugs clearly, and teach the system honestly.
+
+\mainmatter
+
+\part{Foundations}
+\input{chapters/foundations-roadmap}
+\input{chapters/mathematical-foundations}
+\input{chapters/text-data-tokenization}
+
+\part{Model Mechanics}
+\input{chapters/tensors-and-pytorch}
+\input{chapters/embeddings-and-representations}
+\input{chapters/attention-and-transformers}
+\input{chapters/gpt-architecture}
+
+\part{Training}
+\input{chapters/loss-optimization-training}
+\input{chapters/pretraining-engineering}
+\input{chapters/evaluation-and-inference}
+
+\part{Systems And Practice}
+\input{chapters/model-files-and-runtime-buffers}
+\input{chapters/hardware-and-backends}
+\input{chapters/fine-tuning-and-course-projects}
+\input{chapters/lab-manual}
+\input{chapters/glossary}
+
+\backmatter
+\chapter*{Bibliographic Guide}
+\addcontentsline{toc}{chapter}{Bibliographic Guide}
+The bibliography below is deliberately small and practical. It is meant to point students toward the core public references behind this book without turning the course into a literature survey.
+
+\begin{itemize}
+  \item \term{Transformer foundations}: Vaswani et al. introduced the attention-based Transformer architecture used by modern GPT-style systems.
+  \item \term{GPT-style scaling}: Radford et al. and Brown et al. document the base-model and few-shot learning direction that made decoder-only language models central.
+  \item \term{Hands-on learning}: Raschka's book is a useful companion for students who want another from-scratch implementation perspective.
+  \item \term{Backend systems}: Karpathy's \texttt{llm.c}, Hugging Face Candle, PyTorch serialization docs, safetensors docs, and GGUF/llama.cpp references connect training theory to real model artifacts.
+  \item \term{Fine-tuning and alignment}: LoRA and DPO are included because they are practical bridges from base models to adapted and preference-shaped models.
+\end{itemize}
+
+\nocite{raschka2025llmfromscratch,vaswani2017attention,radford2019language,brown2020language,hu2021lora,rafailov2023dpo,karpathyllmc,huggingfacecandle,pytorchsavingloading,huggingfacesafetensors,ggufspec,llamacppconvertgguf}
+\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document}

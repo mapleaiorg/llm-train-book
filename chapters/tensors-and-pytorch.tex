@@ -1,0 +1,774 @@
+\chapter{Tensors And The PyTorch Reference Path}
+
+PyTorch is the first implementation path in this book because it makes the hidden machinery visible enough for students. A production training system may later use Rust/Candle, C/CUDA, or specialized kernels, but PyTorch is the best place to learn the mathematical contract of a GPT model.
+
+This chapter is not a general PyTorch manual. It is a TinyGPT engineering chapter. Every tensor, module, gradient, and normalization operation is explained through the running GPT example.
+
+\section{Chapter Goals}
+
+By the end of this chapter, you should be able to:
+
+\begin{itemize}
+  \item read tensor shapes as part of the program's meaning;
+  \item explain how token IDs become embedding tensors in PyTorch;
+  \item trace a TinyGPT forward pass through modules and functions;
+  \item explain \texttt{nn.Module}, parameters, buffers, devices, and dtypes;
+  \item compute layer normalization for one token vector by hand;
+  \item connect \texttt{loss.backward()} to the chain rule and parameter gradients;
+  \item use shape assertions and tiny experiments to debug a GPT implementation.
+\end{itemize}
+
+\section{Why The PyTorch Path Is Called A Reference Path}
+
+The project should not call the PyTorch implementation simply ``gpt21,'' because \texttt{gpt21} describes a model family and learning pack, not one backend. A clearer structure is:
+
+\begin{lstlisting}
+llm-train/
+  mapletrain/
+    torch_reference/      # readable educational implementation
+    candle_backend/       # Rust/Candle implementation
+    cuda_backend/         # C/CUDA or llm.c-inspired implementation
+  scripts/
+    train_torch.py
+    train_candle.py
+    inspect_tokens.py
+\end{lstlisting}
+
+The phrase \term{reference path} has a specific meaning:
+
+\begin{itemize}
+  \item it is the implementation students read first;
+  \item it should prefer clarity over maximum speed;
+  \item it defines expected tensor shapes and loss behavior;
+  \item other backends should be compared against it.
+\end{itemize}
+
+\begin{center}
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners=2pt, minimum height=0.72cm, text width=2.55cm, align=center},
+  arrow/.style={-{Latex[length=2mm]}, thick},
+  note/.style={font=\small, align=center}
+]
+\node[box, fill=blue!5] (data) at (0,0) {shared token data\\\shape{train.bin}};
+\node[box, fill=red!8] (torch) at (3.2,1.0) {PyTorch\\reference path};
+\node[box, fill=green!10] (candle) at (3.2,0) {Rust/Candle\\systems path};
+\node[box, fill=gray!12] (cuda) at (3.2,-1.0) {C/CUDA\\kernel path};
+\node[box, fill=yellow!18] (compare) at (6.5,0) {compare\\loss, samples,\\throughput};
+\draw[arrow] (data) -- (torch);
+\draw[arrow] (data) -- (candle);
+\draw[arrow] (data) -- (cuda);
+\draw[arrow] (torch) -- (compare);
+\draw[arrow] (candle) -- (compare);
+\draw[arrow] (cuda) -- (compare);
+\node[note] at (3.15,-2.0) {The same math should survive across different engineering backends.};
+\end{tikzpicture}
+\end{center}
+
+\section{The TinyGPT Tensor Contract}
+
+The central rule is simple:
+
+\begin{quote}
+Every tensor shape is a promise about what the numbers mean.
+\end{quote}
+
+For TinyGPT, we continue to use:
+
+\[
+B=2,\qquad T=4,\qquad C=6,\qquad V=9.
+\]
+
+\begin{longtable}{p{0.22\textwidth}p{0.20\textwidth}p{0.44\textwidth}}
+\toprule
+\term{Tensor} & \term{Shape} & \term{Meaning} \\
+\midrule
+\texttt{x} & \shape{[B,T]} & token IDs used as model input \\
+\texttt{y} & \shape{[B,T]} & next-token target IDs \\
+\texttt{tok\_emb(x)} & \shape{[B,T,C]} & token embedding vector at each position \\
+\texttt{pos\_emb(pos)} & \shape{[T,C]} & learned vector for each position \\
+\texttt{h} & \shape{[B,T,C]} & hidden activations inside the model \\
+\texttt{att} & \shape{[B,H,T,T]} & attention scores or probabilities \\
+\texttt{logits} & \shape{[B,T,V]} & one vocabulary score per position \\
+\texttt{loss} & scalar & average training error for the batch \\
+\bottomrule
+\end{longtable}
+
+\begin{center}
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners=2pt, minimum height=0.7cm, text width=2.35cm, align=center},
+  arrow/.style={-{Latex[length=2mm]}, thick},
+  small/.style={font=\small, align=center}
+]
+\node[box, fill=blue!5] (ids) at (0,0) {token IDs\\\shape{[2,4]}};
+\node[box, fill=blue!5] (emb) at (2.9,0) {embeddings\\\shape{[2,4,6]}};
+\node[box, fill=red!8] (block) at (5.8,0) {GPT blocks\\\shape{[2,4,6]}};
+\node[box, fill=red!8] (logits) at (8.7,0) {logits\\\shape{[2,4,9]}};
+\node[box, fill=yellow!18] (loss) at (11.3,0) {loss\\scalar};
+\draw[arrow] (ids) -- node[small, above] {lookup} (emb);
+\draw[arrow] (emb) -- node[small, above] {mix context} (block);
+\draw[arrow] (block) -- node[small, above] {linear head} (logits);
+\draw[arrow] (logits) -- node[small, above] {cross entropy} (loss);
+\end{tikzpicture}
+\end{center}
+
+\section{Tensor Shapes As Types}
+
+In ordinary programming, a type might say ``integer'' or ``string.'' In GPT programming, a shape often carries just as much meaning.
+
+\[
+x \in \mathbb{Z}^{B \times T}
+\]
+
+means that \(x\) is a two-dimensional tensor of token IDs. The two axes mean:
+
+\begin{itemize}
+  \item axis 0: which training example in the batch;
+  \item axis 1: which token position in the context window.
+\end{itemize}
+
+After embedding lookup:
+
+\[
+X = E_{\text{tok}}[x] \in \mathbb{R}^{B \times T \times C}.
+\]
+
+Now the axes mean:
+
+\begin{itemize}
+  \item axis 0: batch example;
+  \item axis 1: token position;
+  \item axis 2: learned feature dimension.
+\end{itemize}
+
+\begin{center}
+\begin{tikzpicture}[
+  cell/.style={draw, minimum width=0.65cm, minimum height=0.45cm, align=center},
+  box/.style={draw, rounded corners=2pt, minimum height=0.65cm, text width=1.85cm, align=center},
+  arrow/.style={-{Latex[length=2mm]}, thick}
+]
+\node[box, fill=blue!5] (ids) at (0,0) {\shape{[B,T]}\\IDs};
+\foreach \r in {0,1} {
+  \foreach \c in {0,1,2,3} {
+    \node[cell, fill=blue!5] at (2+\c*0.65,-\r*0.45) {\scriptsize};
+  }
+}
+\node[font=\small] at (2.95,0.45) {\(x\)};
+\node[box, fill=red!8] (emb) at (5.6,-0.23) {\shape{[B,T,C]}\\vectors};
+\foreach \r in {0,1} {
+  \foreach \c in {0,1,2,3} {
+    \draw[fill=red!6] (7+\c*0.56,-\r*0.48) -- +(0.42,0) -- +(0.54,0.16) -- +(0.12,0.16) -- cycle;
+    \draw (7+\c*0.56,-\r*0.48) rectangle +(0.42,0.34);
+    \draw (7.42+\c*0.56,-\r*0.48) -- +(0.12,0.16);
+    \draw (7.42+\c*0.56,-\r*0.14) -- +(0.12,0.16);
+    \draw (7+\c*0.56,-\r*0.14) -- +(0.12,0.16);
+  }
+}
+\draw[arrow] (ids) -- (1.5,-0.22);
+\draw[arrow] (4.85,-0.23) -- (emb);
+\draw[arrow] (emb) -- (6.65,-0.23);
+\node[font=\small] at (8.05,0.55) {each ID becomes a length-\(C\) feature vector};
+\end{tikzpicture}
+\end{center}
+
+\term{Engineering rule}: never rely on memory alone. Write the expected shapes near the code that creates them.
+
+\begin{lstlisting}[language=Python]
+B, T, C, V = 2, 4, 6, 9
+x = torch.tensor([[2, 3, 4, 5],
+                  [3, 4, 5, 6]])       # [B, T]
+tok_emb = nn.Embedding(V, C)
+X = tok_emb(x)                          # [B, T, C]
+assert X.shape == (B, T, C)
+\end{lstlisting}
+
+\section{Minimal PyTorch Objects}
+
+The most important PyTorch objects are:
+
+\begin{longtable}{p{0.23\textwidth}p{0.62\textwidth}}
+\toprule
+\term{Object} & \term{Role in TinyGPT} \\
+\midrule
+\texttt{torch.Tensor} & multidimensional array with shape, dtype, and device \\
+\texttt{nn.Parameter} & trainable tensor owned by a module \\
+\texttt{nn.Module} & object that owns layers and defines \texttt{forward} \\
+\texttt{Optimizer} & updates parameters using gradients \\
+\texttt{autograd} & records operations and computes derivatives \\
+\bottomrule
+\end{longtable}
+
+The model is not just code. It is code plus owned tensors.
+
+\begin{center}
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners=2pt, minimum height=0.65cm, text width=2.65cm, align=center},
+  arrow/.style={-{Latex[length=2mm]}, thick}
+]
+\node[box, fill=blue!5] (module) at (0,0) {\texttt{TinyGPT}\\\texttt{nn.Module}};
+\node[box, fill=red!8] (params) at (3.2,1.0) {parameters\\embedding, linear,\\LayerNorm};
+\node[box, fill=gray!12] (forward) at (3.2,0) {\texttt{forward(x,y)}\\computation};
+\node[box, fill=yellow!18] (children) at (3.2,-1.0) {child modules\\blocks, attention,\\MLP};
+\node[box, fill=green!10] (outputs) at (6.4,0) {logits, loss};
+\draw[arrow] (module) -- (params);
+\draw[arrow] (module) -- (forward);
+\draw[arrow] (module) -- (children);
+\draw[arrow] (params) -- (forward);
+\draw[arrow] (children) -- (forward);
+\draw[arrow] (forward) -- (outputs);
+\end{tikzpicture}
+\end{center}
+
+\section{A Linear Layer As A Wiring Diagram}
+
+A linear layer computes:
+
+\[
+Y = XW^\top + b.
+\]
+
+PyTorch stores \texttt{nn.Linear(in\_features, out\_features)} weights with shape:
+
+\[
+W \in \mathbb{R}^{\text{out\_features} \times \text{in\_features}}.
+\]
+
+Mathematically, for one input vector \(\mathbf{x}\in \mathbb{R}^{C}\):
+
+\[
+y_j = \sum_{i=1}^{C} W_{j,i}x_i + b_j.
+\]
+
+For TinyGPT with \(C=6\), a small hidden vector can be transformed into another six-dimensional vector:
+
+\begin{center}
+\begin{tikzpicture}[
+  neuron/.style={circle, draw, minimum size=0.68cm, align=center},
+  arrow/.style={-{Latex[length=1.8mm]}, thin},
+  lab/.style={font=\small, align=center}
+]
+\foreach \i/\v in {0/0.12,1/-0.04,2/0.31,3/0.08,4/-0.17,5/0.22} {
+  \node[neuron, fill=blue!5] (x\i) at (0,-\i*0.58) {\scriptsize \v};
+}
+\foreach \j/\v in {0/0.19,1/0.00,2/0.43,3/0.11,4/-0.08,5/0.27} {
+  \node[neuron, fill=red!8] (y\j) at (4.4,-\j*0.58) {\scriptsize \v};
+}
+\foreach \i in {0,1,2,3,4,5} {
+  \foreach \j in {0,1,2,3,4,5} {
+    \draw[arrow, opacity=0.25] (x\i) -- (y\j);
+  }
+}
+\node[lab] at (0,0.75) {input\\features};
+\node[lab] at (4.4,0.75) {output\\features};
+\node[lab] at (2.2,-3.9) {Each output feature is a weighted sum of all input features plus a bias.};
+\end{tikzpicture}
+\end{center}
+
+\begin{lstlisting}[language=Python]
+layer = nn.Linear(6, 6)
+y = layer(x)          # x: [6], y: [6]
+\end{lstlisting}
+
+When the same layer receives a rank-3 tensor \shape{[B,T,C]}, PyTorch applies the same linear transformation independently to every \shape{[C]} vector:
+
+\begin{lstlisting}[language=Python]
+h = torch.randn(B, T, C)
+y = layer(h)          # [B, T, C]
+\end{lstlisting}
+
+\section{Layer Normalization: Stabilizing One Token Vector}
+
+Layer normalization is one of the most important operations inside GPT blocks. It makes each token's feature vector easier for the next sublayer to process.
+
+For one token vector:
+
+\[
+\mathbf{x} =
+\begin{bmatrix}
+0.22 & 0.34 & 0.00 & 0.22 & 0.00 & 0.00
+\end{bmatrix},
+\]
+
+layer normalization first computes the mean across the feature dimension:
+
+\[
+\mu = \frac{1}{C}\sum_{i=1}^{C}x_i.
+\]
+
+Then it computes the variance:
+
+\[
+\sigma^2 = \frac{1}{C}\sum_{i=1}^{C}(x_i-\mu)^2.
+\]
+
+Then it normalizes every feature:
+
+\[
+\hat{x}_i = \frac{x_i-\mu}{\sqrt{\sigma^2+\epsilon}}.
+\]
+
+Finally it learns a scale and shift:
+
+\[
+y_i = \gamma_i \hat{x}_i + \beta_i.
+\]
+
+Here \(\gamma,\beta \in \mathbb{R}^{C}\) are trainable parameters. At initialization, PyTorch usually starts with \(\gamma_i=1\) and \(\beta_i=0\).
+
+\begin{center}
+\begin{tikzpicture}[
+  cell/.style={draw, circle, minimum size=0.72cm, align=center},
+  box/.style={draw, rounded corners=4pt, minimum height=0.58cm, text width=5.4cm, align=center},
+  arrow/.style={-{Latex[length=2mm]}, thick},
+  note/.style={font=\small, align=center}
+]
+\foreach \i/\v in {0/0.22,1/0.34,2/0.00,3/0.22,4/0.00,5/0.00} {
+  \node[cell, fill=blue!5] (a\i) at (\i*1.02,0) {\scriptsize \v};
+}
+\node[note, anchor=east] at (-0.45,0) {activation vector\\for one token};
+
+\node[box, fill=yellow!18] (stats) at (2.55,1.35) {compute \(\mu=0.13\), \(\sigma^2\approx0.016\) across the six features};
+\node[box, fill=gray!12] (norm) at (2.55,2.45) {subtract mean, divide by standard deviation};
+\foreach \i/\v in {0/0.72,1/1.68,2/-1.04,3/0.72,4/-1.04,5/-1.04} {
+  \node[cell, fill=red!8] (b\i) at (\i*1.02,3.55) {\scriptsize \v};
+}
+\node[note, anchor=west] at (6.4,3.55) {roughly zero mean\\and unit variance};
+
+\foreach \i in {0,1,2,3,4,5} {
+  \draw[arrow] (a\i) -- (stats);
+  \draw[arrow] (norm) -- (b\i);
+}
+\draw[arrow] (stats) -- (norm);
+\node[note] at (2.55,-0.78) {LayerNorm normalizes across features for the same token position, not across the batch.};
+\end{tikzpicture}
+\end{center}
+
+This is the key visual idea: each token position carries a feature vector, and LayerNorm cleans up that vector before the next operation uses it.
+
+\subsection{LayerNorm In A Batch}
+
+For a full hidden tensor:
+
+\[
+h \in \mathbb{R}^{B \times T \times C},
+\]
+
+LayerNorm normalizes along the final axis \(C\). It does this separately for every pair \((b,t)\).
+
+\begin{center}
+\begin{tikzpicture}[
+  cube/.style={draw, fill=blue!5},
+  slice/.style={draw, fill=red!8},
+  arrow/.style={-{Latex[length=2mm]}, thick},
+  note/.style={font=\small, align=center}
+]
+\draw[cube] (0,0) rectangle (2.8,1.5);
+\draw[cube] (0.35,0.35) rectangle (3.15,1.85);
+\draw (0,1.5) -- (0.35,1.85);
+\draw (2.8,1.5) -- (3.15,1.85);
+\draw (2.8,0) -- (3.15,0.35);
+\node[note] at (1.55,0.78) {\(h\)\\\shape{[B,T,C]}};
+
+\draw[slice] (4.7,0.55) rectangle (7.0,1.05);
+\foreach \i in {0,1,2,3,4,5} {
+  \draw (4.7+\i*0.38,0.55) rectangle +(0.38,0.5);
+}
+\node[note] at (5.85,1.45) {one token vector\\\shape{[C]}};
+\draw[arrow] (3.2,0.9) -- (4.55,0.8);
+\node[note] at (5.85,-0.15) {mean and variance are computed here};
+
+\node[note] at (1.55,-0.65) {choose one batch row and one time position};
+\end{tikzpicture}
+\end{center}
+
+In code:
+
+\begin{lstlisting}[language=Python]
+ln = nn.LayerNorm(C)
+h = torch.randn(B, T, C)
+out = ln(h)          # [B, T, C]
+\end{lstlisting}
+
+The shape does not change. Only the values change.
+
+\subsection{Why GPT Uses LayerNorm}
+
+During training, hidden activations can drift. Some features become too large, some too small, and different layers may receive inputs on very different scales. LayerNorm helps by giving each token vector a predictable scale before attention or the MLP sees it.
+
+Modern GPT implementations often use \term{pre-normalization}:
+
+\[
+h \leftarrow h + \operatorname{Attention}(\operatorname{LayerNorm}(h)),
+\]
+
+\[
+h \leftarrow h + \operatorname{MLP}(\operatorname{LayerNorm}(h)).
+\]
+
+\begin{center}
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners=2pt, minimum height=0.62cm, text width=1.95cm, align=center},
+  arrow/.style={-{Latex[length=2mm]}, thick},
+  plus/.style={circle, draw, minimum size=0.55cm, align=center}
+]
+\node[box, fill=blue!5] (h0) at (0,0) {\(h\)};
+\node[box, fill=yellow!18] (ln1) at (2.0,0) {LayerNorm};
+\node[box, fill=red!8] (attn) at (4.0,0) {Attention};
+\node[plus] (add1) at (6.0,0) {\(+\)};
+\node[box, fill=blue!5] (h1) at (7.5,0) {\(h'\)};
+\node[box, fill=yellow!18] (ln2) at (9.5,0) {LayerNorm};
+\node[box, fill=red!8] (mlp) at (11.5,0) {MLP};
+\node[plus] (add2) at (13.5,0) {\(+\)};
+\node[box, fill=blue!5] (h2) at (15.0,0) {output};
+\draw[arrow] (h0) -- (ln1);
+\draw[arrow] (ln1) -- (attn);
+\draw[arrow] (attn) -- (add1);
+\draw[arrow] (add1) -- (h1);
+\draw[arrow] (h0) .. controls (2,-1.2) and (4,-1.2) .. (add1);
+\draw[arrow] (h1) -- (ln2);
+\draw[arrow] (ln2) -- (mlp);
+\draw[arrow] (mlp) -- (add2);
+\draw[arrow] (add2) -- (h2);
+\draw[arrow] (h1) .. controls (9.5,-1.2) and (11.5,-1.2) .. (add2);
+\end{tikzpicture}
+\end{center}
+
+The residual paths carry the original information forward. The LayerNorm paths prepare stable inputs for the trainable sublayers.
+
+\section{LayerNorm Source Code Logic}
+
+A minimal educational LayerNorm implementation is:
+
+\begin{lstlisting}[language=Python]
+class TinyLayerNorm(nn.Module):
+    def __init__(self, n_embd, eps=1e-5):
+        super().__init__()
+        self.gamma = nn.Parameter(torch.ones(n_embd))
+        self.beta = nn.Parameter(torch.zeros(n_embd))
+        self.eps = eps
+
+    def forward(self, x):
+        # x: [B, T, C]
+        mean = x.mean(dim=-1, keepdim=True)              # [B, T, 1]
+        var = ((x - mean) ** 2).mean(dim=-1, keepdim=True)
+        x_hat = (x - mean) / torch.sqrt(var + self.eps)  # [B, T, C]
+        return self.gamma * x_hat + self.beta            # [B, T, C]
+\end{lstlisting}
+
+Read it line by line:
+
+\begin{itemize}
+  \item \texttt{dim=-1} means normalize over the feature axis \(C\);
+  \item \texttt{keepdim=True} keeps the shape broadcastable as \shape{[B,T,1]};
+  \item \texttt{gamma} and \texttt{beta} are learned feature-wise corrections;
+  \item the output shape remains \shape{[B,T,C]}.
+\end{itemize}
+
+\begin{center}
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners=2pt, minimum height=0.62cm, text width=2.25cm, align=center},
+  arrow/.style={-{Latex[length=2mm]}, thick},
+  note/.style={font=\small, align=center}
+]
+\node[box, fill=blue!5] (x) at (0,0) {\texttt{x}\\\shape{[B,T,C]}};
+\node[box, fill=yellow!18] (mean) at (2.8,0.9) {\texttt{mean}\\\shape{[B,T,1]}};
+\node[box, fill=yellow!18] (var) at (2.8,-0.9) {\texttt{var}\\\shape{[B,T,1]}};
+\node[box, fill=gray!12] (hat) at (5.7,0) {\texttt{x\_hat}\\\shape{[B,T,C]}};
+\node[box, fill=red!8] (out) at (8.6,0) {scale + shift\\\shape{[B,T,C]}};
+\draw[arrow] (x) -- (mean);
+\draw[arrow] (x) -- (var);
+\draw[arrow] (mean) -- (hat);
+\draw[arrow] (var) -- (hat);
+\draw[arrow] (x) -- (hat);
+\draw[arrow] (hat) -- (out);
+\node[note] at (8.6,-1.0) {\(\gamma,\beta \in \mathbb{R}^{C}\)};
+\end{tikzpicture}
+\end{center}
+
+\section{Autograd: The Backward Machine}
+
+PyTorch autograd records differentiable tensor operations during the forward pass. When \texttt{loss.backward()} is called, PyTorch walks the graph backward and fills each parameter's \texttt{.grad} tensor.
+
+\begin{center}
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners=2pt, minimum height=0.62cm, text width=2.0cm, align=center},
+  arrow/.style={-{Latex[length=2mm]}, thick},
+  back/.style={{Latex[length=2mm]}-, thick, red!70!black}
+]
+\node[box, fill=blue!5] (x) at (0,0) {\(x\)};
+\node[box, fill=blue!5] (emb) at (2.3,0) {embedding};
+\node[box, fill=red!8] (block) at (4.6,0) {blocks};
+\node[box, fill=red!8] (head) at (6.9,0) {head};
+\node[box, fill=yellow!18] (loss) at (9.2,0) {loss};
+\draw[arrow] (x) -- (emb);
+\draw[arrow] (emb) -- (block);
+\draw[arrow] (block) -- (head);
+\draw[arrow] (head) -- (loss);
+\draw[back] (emb.south) .. controls (3,-1.2) and (5.8,-1.2) .. (loss.south);
+\node[font=\small, align=center] at (4.6,-1.55) {backward pass computes gradients for trainable parameters};
+\end{tikzpicture}
+\end{center}
+
+The training loop has a strict order:
+
+\begin{lstlisting}[language=Python]
+logits, loss = model(x, y)
+optimizer.zero_grad(set_to_none=True)
+loss.backward()
+optimizer.step()
+\end{lstlisting}
+
+\begin{longtable}{p{0.26\textwidth}p{0.56\textwidth}}
+\toprule
+\term{Line} & \term{Meaning} \\
+\midrule
+\texttt{model(x,y)} & run the forward pass and compute the loss \\
+\texttt{zero\_grad} & clear gradients from the previous step \\
+\texttt{backward} & compute current gradients by chain rule \\
+\texttt{step} & update parameters using those gradients \\
+\bottomrule
+\end{longtable}
+
+Gradients accumulate by default. This is useful for gradient accumulation, but confusing for beginners. If you forget to clear gradients, the optimizer may update parameters using a mixture of old and new information.
+
+\section{Devices And Dtypes}
+
+A tensor has both a dtype and a device.
+
+\begin{longtable}{p{0.22\textwidth}p{0.64\textwidth}}
+\toprule
+\term{dtype} & \term{Use} \\
+\midrule
+\texttt{torch.long} & token IDs and target class labels \\
+\texttt{float32} & stable default for learning and debugging \\
+\texttt{float16} & faster on many modern GPUs, but less numerically forgiving \\
+\texttt{bfloat16} & mixed precision with a wider exponent range on supported hardware \\
+\bottomrule
+\end{longtable}
+
+The token ID tensor is integer:
+
+\begin{lstlisting}[language=Python]
+x = torch.randint(0, V, (B, T), dtype=torch.long)
+\end{lstlisting}
+
+The model parameters are floating point:
+
+\begin{lstlisting}[language=Python]
+model = TinyGPT(config).to(device)
+x = x.to(device)
+y = y.to(device)
+\end{lstlisting}
+
+\begin{center}
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners=2pt, minimum height=0.65cm, text width=2.55cm, align=center},
+  arrow/.style={-{Latex[length=2mm]}, thick}
+]
+\node[box, fill=blue!5] (cpu) at (0,0) {CPU tensor\\\texttt{device='cpu'}};
+\node[box, fill=red!8] (gpu) at (4,0) {GPU tensor\\\texttt{device='cuda'}};
+\node[box, fill=yellow!18] (rule) at (8,0) {operation requires\\compatible devices};
+\draw[arrow] (cpu) -- node[above] {\texttt{.to(device)}} (gpu);
+\draw[arrow] (gpu) -- (rule);
+\end{tikzpicture}
+\end{center}
+
+On older consumer GPUs, full mixed precision may not provide the same benefits as on modern data center GPUs. Always keep a stable \texttt{float32} path for debugging.
+
+\section{TinyGPT Source Code Walkthrough}
+
+The following simplified code shows how the mathematical blocks become software blocks.
+
+\subsection{The Configuration Object}
+
+\begin{lstlisting}[language=Python]
+@dataclass
+class GPTConfig:
+    vocab_size: int = 9
+    block_size: int = 4
+    n_embd: int = 6
+    n_layer: int = 2
+    n_head: int = 2
+\end{lstlisting}
+
+The config is a small contract. It tells every module how wide, deep, and long the model is.
+
+\subsection{The Model Forward Pass}
+
+\begin{lstlisting}[language=Python]
+def forward(self, idx, targets=None):
+    B, T = idx.shape
+    pos = torch.arange(0, T, device=idx.device)
+
+    tok = self.tok_emb(idx)       # [B, T, C]
+    pos = self.pos_emb(pos)       # [T, C]
+    h = tok + pos                 # [B, T, C]
+
+    for block in self.blocks:
+        h = block(h)              # [B, T, C]
+
+    h = self.ln_f(h)              # [B, T, C]
+    logits = self.lm_head(h)      # [B, T, V]
+
+    loss = None
+    if targets is not None:
+        loss = F.cross_entropy(
+            logits.view(B*T, -1),
+            targets.view(B*T)
+        )
+    return logits, loss
+\end{lstlisting}
+
+\begin{center}
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners=2pt, minimum height=0.62cm, text width=1.85cm, align=center},
+  arrow/.style={-{Latex[length=2mm]}, thick},
+  plus/.style={circle, draw, minimum size=0.5cm, align=center}
+]
+\node[box, fill=blue!5] (idx) at (0,0) {idx\\\shape{[B,T]}};
+\node[box, fill=blue!5] (tok) at (2.1,0.65) {token emb\\\shape{[B,T,C]}};
+\node[box, fill=blue!5] (pos) at (2.1,-0.65) {position emb\\\shape{[T,C]}};
+\node[plus] (add) at (4.0,0) {\(+\)};
+\node[box, fill=red!8] (blocks) at (6.0,0) {blocks\\repeat};
+\node[box, fill=yellow!18] (ln) at (8.1,0) {final LN};
+\node[box, fill=red!8] (head) at (10.2,0) {lm head};
+\node[box, fill=green!10] (logits) at (12.3,0) {logits\\\shape{[B,T,V]}};
+\draw[arrow] (idx) -- (tok);
+\draw[arrow] (idx) -- (pos);
+\draw[arrow] (tok) -- (add);
+\draw[arrow] (pos) -- (add);
+\draw[arrow] (add) -- (blocks);
+\draw[arrow] (blocks) -- (ln);
+\draw[arrow] (ln) -- (head);
+\draw[arrow] (head) -- (logits);
+\end{tikzpicture}
+\end{center}
+
+\subsection{The Transformer Block}
+
+A pre-norm GPT block is often written:
+
+\begin{lstlisting}[language=Python]
+def forward(self, x):
+    x = x + self.attn(self.ln_1(x))
+    x = x + self.mlp(self.ln_2(x))
+    return x
+\end{lstlisting}
+
+This is short but dense. Read it as:
+
+\begin{enumerate}
+  \item normalize the current hidden state;
+  \item let attention mix information across token positions;
+  \item add the attention result back to the original hidden state;
+  \item normalize again;
+  \item let the MLP transform each position independently;
+  \item add the MLP result back.
+\end{enumerate}
+
+\section{A Shape Debugging Pattern}
+
+The best beginner debugging habit is to assert shapes at module boundaries:
+
+\begin{lstlisting}[language=Python]
+assert idx.shape == (B, T)
+logits, loss = model(idx, targets)
+assert logits.shape == (B, T, V)
+assert loss.ndim == 0
+\end{lstlisting}
+
+For internal modules:
+
+\begin{lstlisting}[language=Python]
+def forward(self, x):
+    B, T, C = x.shape
+    assert C == self.config.n_embd
+    ...
+\end{lstlisting}
+
+Shape assertions are small, but they turn many silent mistakes into immediate, local errors.
+
+\section{Common Beginner Mistakes}
+
+\begin{longtable}{p{0.28\textwidth}p{0.32\textwidth}p{0.24\textwidth}}
+\toprule
+\term{Mistake} & \term{Symptom} & \term{Fix} \\
+\midrule
+Wrong target dtype & cross entropy error & use \texttt{torch.long} targets \\
+Device mismatch & CPU/CUDA runtime error & move model and tensors to same device \\
+Wrong reshape before loss & bad loss or shape error & use \shape{[B*T,V]} and \shape{[B*T]} \\
+Forgot \texttt{zero\_grad} & unstable updates & clear gradients each step \\
+Wrong LayerNorm axis & weak or broken training & normalize last dimension \(C\) \\
+Position length too long & embedding index error & keep \(T \leq\) block size \\
+\bottomrule
+\end{longtable}
+
+\engineering
+
+For a teaching repo, keep the PyTorch path intentionally inspectable:
+
+\begin{itemize}
+  \item prefer explicit shape comments over clever one-liners;
+  \item write a tiny config that runs on CPU;
+  \item add tests that check tensor shapes and one training step;
+  \item log loss, learning rate, tokens/sec, and gradient norm;
+  \item keep the same token binary format shared with Candle and C/CUDA backends.
+\end{itemize}
+
+\labtitle{Trace LayerNorm And Autograd}
+
+Create a file called \texttt{experiments/layernorm\_trace.py}. Use the following experiment:
+
+\begin{lstlisting}[language=Python]
+import torch
+import torch.nn as nn
+
+torch.manual_seed(7)
+B, T, C = 2, 4, 6
+h = torch.tensor([[[0.22, 0.34, 0.00, 0.22, 0.00, 0.00]]],
+                 dtype=torch.float32)
+
+ln = nn.LayerNorm(C)
+out = ln(h)
+
+print("input shape:", h.shape)
+print("output shape:", out.shape)
+print("input mean:", h.mean(dim=-1))
+print("output mean:", out.mean(dim=-1))
+print("output var:", out.var(dim=-1, unbiased=False))
+\end{lstlisting}
+
+Then extend the experiment:
+
+\begin{lstlisting}[language=Python]
+linear = nn.Linear(C, 9)
+logits = linear(out)
+target = torch.tensor([[7]])
+loss = nn.functional.cross_entropy(logits.view(1, 9), target.view(1))
+
+linear.zero_grad(set_to_none=True)
+loss.backward()
+print("loss:", loss.item())
+print("linear weight grad shape:", linear.weight.grad.shape)
+\end{lstlisting}
+
+\checkpoint
+
+\begin{enumerate}
+  \item Why does \texttt{nn.Embedding(V,C)} turn \shape{[B,T]} into \shape{[B,T,C]}?
+  \item In LayerNorm, why do we normalize across the final dimension \(C\), not across the batch?
+  \item What are \(\gamma\) and \(\beta\) in LayerNorm?
+  \item Why does \texttt{cross\_entropy} usually require logits shaped as \shape{[B*T,V]} and targets shaped as \shape{[B*T]}?
+  \item What does \texttt{loss.backward()} store in each parameter?
+  \item Why is the PyTorch backend called the reference path?
+\end{enumerate}
+
+\subsection*{Solutions}
+
+\begin{enumerate}
+  \item \texttt{nn.Embedding(V,C)} is a lookup table with \(V\) rows and \(C\) columns. Each token ID selects one row. A batch of IDs \shape{[B,T]} therefore becomes a batch of vectors \shape{[B,T,C]}.
+  \item Each token position needs its own feature vector stabilized. Normalizing across the batch would mix statistics from different training examples, which is not the operation GPT blocks expect.
+  \item \(\gamma\) is a learned scale vector and \(\beta\) is a learned shift vector. They let the model recover useful feature scales after normalization.
+  \item Cross entropy treats each row as one classification problem. TinyGPT has \(B \times T\) next-token predictions, each over \(V\) vocabulary choices.
+  \item It stores the derivative of the loss with respect to that parameter in \texttt{parameter.grad}.
+  \item It is the clearest implementation used to define expected behavior. Faster or lower-level backends can be compared against it for correctness.
+\end{enumerate}
