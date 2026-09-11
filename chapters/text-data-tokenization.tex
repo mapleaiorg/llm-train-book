@@ -536,10 +536,12 @@ Y=
 
 \begin{lstlisting}[language=Python]
 def get_batch(tokens, batch_size, block_size):
-    # tokens is a 1D tensor or list of token IDs.
+    tokens = torch.as_tensor(tokens, dtype=torch.long)
+    if block_size <= 0 or len(tokens) <= block_size:
+        raise ValueError("need at least block_size + 1 tokens")
     starts = torch.randint(
         low=0,
-        high=len(tokens) - block_size - 1,
+        high=len(tokens) - block_size,
         size=(batch_size,),
     )
 
@@ -565,7 +567,11 @@ def get_batch(tokens, batch_size, block_size):
   \item \texttt{torch.stack}: turns a list of rows into a batch tensor.
 \end{itemize}
 
-\term{Why the upper bound subtracts \texttt{block\_size + 1}}: each start position must have enough future tokens to build both \(x\) and \(y\). Otherwise the target row would be too short.
+\term{Why the exclusive upper bound is \(N-T\)}: the last valid start is
+\(N-T-1\), where \(N\) is the number of tokens and \(T\) is the block size.
+That start still supplies \(T+1\) tokens. Subtracting one again would discard
+the last window and reject the smallest valid dataset. The executable
+\texttt{test\_shift\_and\_last\_valid\_start} locks down this boundary.
 
 \section{Binary Token Files}
 

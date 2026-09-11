@@ -1,0 +1,15 @@
+% Native vector house style. Shape and text redundantly encode each role.
+\definecolor{engineink}{HTML}{183247}
+\definecolor{engineblue}{HTML}{E5EFF8}
+\definecolor{enginegreen}{HTML}{E1F1E9}
+\definecolor{enginegold}{HTML}{F5ECD7}
+\tikzset{
+  enginebox/.style={draw=engineink, line width=.7pt, rounded corners=3pt,
+    text=engineink, align=center, font=\small\sffamily,
+    minimum height=1.1cm, text width=3.1cm, inner sep=7pt},
+  engineop/.style={enginebox, fill=engineblue},
+  enginestate/.style={enginebox, fill=enginegold},
+  enginevalue/.style={enginebox, fill=enginegreen},
+  enginearrow/.style={-{Latex[length=2.4mm]}, draw=engineink, line width=.8pt},
+  enginenote/.style={font=\footnotesize\sffamily, text=engineink, align=center}
+}

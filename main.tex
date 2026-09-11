@@ -13,6 +13,16 @@
 \usepackage{listings}
 \usepackage{tikz}
 \usepackage{microtype}
+\usepackage{adjustbox}
+\usepackage{needspace}
+\usepackage{etoolbox}
+% Keep legacy and new TikZ plates inside the printable measure, without rasterizing.
+\BeforeBeginEnvironment{tikzpicture}{\begin{adjustbox}{max width=\linewidth}}
+\AfterEndEnvironment{tikzpicture}{\end{adjustbox}}
+\BeforeBeginEnvironment{tabular}{\begin{adjustbox}{max width=\linewidth}}
+\AfterEndEnvironment{tabular}{\end{adjustbox}}
+\setlength{\emergencystretch}{3em}
+\input{figures/style}
 \usetikzlibrary{arrows.meta,positioning,fit,shapes.geometric,calc,decorations.pathreplacing}
 
 \hypersetup{
@@ -20,7 +30,7 @@
   linkcolor=blue!50!black,
   citecolor=blue!50!black,
   urlcolor=blue!60!black,
-  pdftitle={Training LLMs From Scratch},
+  pdftitle={Training Large Language Models From Scratch},
   pdfauthor={MapleAI Intelligence Inc.}
 }
 
@@ -46,9 +56,9 @@
 \newcommand{\checkpoint}{\subsection*{Checkpoint Questions}}
 \newcommand{\engineering}{\subsection*{Engineering Practice}}
 
-\title{Training Large Language Models From Scratch\\\large An Undergraduate Textbook for Theory, Engineering, and Hands-on Practice}
+\title{Training Large Language Models From Scratch\\\large From tokens and gradients to industrial distributed training.}
 \author{MapleAI Intelligence Inc.}
-\date{Draft v1.0}
+\date{Working edition: September 2026}
 
 \begin{document}
 
@@ -61,6 +71,14 @@ This book is written for undergraduate students meeting artificial intelligence 
 
 The book is original MapleAI instructional material. It is informed by the public scientific literature and by well-known open-source implementations, but it is organized as a standalone textbook for the \texttt{llm-train} project. The emphasis is on clear definitions, mathematical derivations, shape reasoning, practical labs, and disciplined engineering.
 
+\term{Evidence boundary for this working edition.} Historical GPT21 and backend
+case studies in Parts I--IV are reported instructional material; their raw run
+artifacts are not bundled here and have not been reproduced in this revision.
+Part V introduces the repository's executable CPU reference and its tests.
+Quantitative reasoning distinguishes measured results, derived formulas,
+reported observations and estimates. Neither the title nor a roadmap entry
+means that distributed industrial training is already implemented.
+
 \chapter*{How To Use This Book}
 The chapters are intentionally named by topic instead of by inherited source numbers. A student can read the book front to back, while an instructor can assign each part as a module:
 
@@ -69,6 +87,7 @@ The chapters are intentionally named by topic instead of by inherited source num
   \item Part II constructs the GPT model from tensors, embeddings, attention, and Transformer blocks.
   \item Part III trains, evaluates, and samples from a model.
   \item Part IV explains systems backends, course projects, and professional practice.
+  \item Part V connects the foundations to a tested modern CPU training engine and the checkpoint boundary with inference. Distributed training remains a later implementation milestone.
 \end{itemize}
 
 Each chapter contains three layers: theory, engineering practice, and hands-on labs. The labs are designed to be run on small hardware first. A good training culture begins with tiny models that fail fast, reveal bugs clearly, and teach the system honestly.
@@ -97,6 +116,10 @@ Each chapter contains three layers: theory, engineering practice, and hands-on l
 \input{chapters/fine-tuning-and-course-projects}
 \input{chapters/lab-manual}
 \input{chapters/glossary}
+
+\part{The Executable Training Engine}
+\input{chapters/executable-modern-core}
+\input{chapters/checkpoint-runtime-boundary}
 
 \backmatter
 \chapter*{Bibliographic Guide}

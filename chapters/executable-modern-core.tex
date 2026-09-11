@@ -1,0 +1,241 @@
+\chapter{An Executable Modern Training Core}
+\label{ch:modern-core}
+
+The earlier chapters teach TinyGPT by taking its components apart. This chapter
+puts a complete, deliberately small model under test. A reader should be able to
+change an equation, see a failing test, and explain why the test failed. That is
+the bridge from understanding a model to engineering a training system.
+
+The implementation lives in \texttt{code/minillm/}. It uses PyTorch autograd and
+CPU FP32 arithmetic; it does not implement a new differentiation framework.
+Its name, \term{TinyLM3}, identifies a modern teaching lineage, not a compatible
+implementation of a commercial model. Nothing downloads weights or a dataset.
+The reference run needs neither a GPU nor an external service.
+
+\section{Four Planes, One Correctness Contract}
+
+\begin{figure}[htbp]\centering
+\input{figures/training-planes}
+\caption{A training system has four distinct responsibilities. Distribution is
+a planned extension here, not an implemented feature of the CPU trainer.}
+\label{fig:training-planes}
+\end{figure}
+
+The model specifies which function is differentiated. Execution decides how
+tensors, gradients and optimizer state realize that function. Distribution
+partitions that work across processes and devices. Operations makes the run
+identifiable, recoverable and observable. A correct local model does not prove
+a correct collective; a successful checkpoint write does not prove a correct
+restart. We will add each claim only with its own test.
+
+\section{An Explicit Lineage Change}
+
+Do not silently replace the definitions in the introductory chapters. Their
+learned position embeddings, LayerNorm and GELU remain a useful TinyGPT path.
+The modern core makes a different, explicit choice:
+
+\begin{center}
+\begin{tabular}{lll}\toprule
+Decision & Earlier TinyGPT teaching path & TinyLM3 executable core \\\midrule
+Position & Learned embedding table & Adjacent-pair RoPE on Q and K \\
+Normalization & LayerNorm & Pre-block RMSNorm and final RMSNorm \\
+Attention & Multi-head & Grouped-query, causal \\
+MLP & GELU two-layer MLP & SwiGLU gate, up and down \\
+Output weights & Tying discussed as an option & Untied embedding and head \\
+Dropout & Explained and configurable in examples & Absent in this milestone \\\bottomrule
+\end{tabular}
+\end{center}
+
+The new choices follow RMSNorm, rotary position embeddings, GQA and gated MLP
+literature \cite{zhang2019rmsnorm,su2021rope,ainslie2023gqa,shazeer2020glu}.
+They do not imply a quality improvement on our eight-character pattern. This
+fixture tests mechanics, not language competence.
+
+\section{The Typed Forward Pass}
+
+Let \(B\) denote sequences per batch, \(T\) positions per sequence, \(V\)
+vocabulary size, \(D\) residual width, \(H_q\) query heads, \(H_{kv}\) key/value
+heads and \(d=D/H_q\) head width. Configuration rejects nonpositive dimensions,
+nondivisible head groups, odd rotary widths and invalid epsilon. The default
+is \(V=8,T\leq16,D=32,L=2,H_q=4,H_{kv}=2,F=64\), where \(F\) is MLP width.
+
+The parameter count is \term{DERIVED}, with untied vocabulary matrices and no biases:
+\[
+ P=2VD+L\bigl(2D^2+2DH_{kv}d+3DF+2D\bigr)+D=19{,}104.
+\]
+The terms count embedding/head, Q/O, K/V, three MLP matrices, two block
+normalization gains and final gain. A test checks this formula against every
+registered parameter; a different weight-tying policy would change the count.
+
+The data layer consumes \(T+1\) consecutive int64 token IDs:
+\[
+ x_{b,t}=s_{b,t},\qquad y_{b,t}=s_{b,t+1},\qquad 0\leq t<T.
+\]
+Targets are already shifted. Shifting them again changes the task into
+two-token-ahead prediction. Taking \(y=x\) makes a copying shortcut possible.
+The final-window test uses exactly \(T+1\) tokens, a boundary that catches an
+off-by-one error in the original batch example.
+
+Embedding lookup maps \([B,T]\) IDs to \([B,T,D]\) activations. The embedding
+table is a persistent parameter, while the batch activation belongs to this
+forward pass. Each block preserves residual width; the final head maps to raw
+logits \(Z\in\mathbb{R}^{B\times T\times V}\). Do not apply softmax before
+\texttt{cross\_entropy}: the library combines normalization and logarithms
+using a numerically stable formulation.
+
+\begin{figure}[htbp]\centering
+\input{figures/modern-block}
+\caption{One pre-normalized TinyLM3 block. Solid arrows carry activations;
+the two bypasses are additive identity paths, not additional learned projections.}
+\label{fig:modern-block}
+\end{figure}
+
+\section{RMSNorm: A Small Formula With a Real Gradient}
+
+For one token vector \(x\in\mathbb{R}^{D}\), learned gain
+\(g\in\mathbb{R}^{D}\) and positive scalar \(\epsilon\), define
+\[
+ r=\left(\frac{1}{D}\sum_{j=1}^{D}x_j^2+\epsilon\right)^{-1/2},
+ \qquad u_i=g_i x_i r.
+\]
+There is no subtraction of the mean. Gain is applied after the shared scale,
+and the output need not have unit RMS. For \(x=(1,-2,3,-4)\), the mean square
+is \(7.5\); the test compares every coordinate against
+\(x/\sqrt{7.5+10^{-5}}\) with unit gain.
+
+To see why backward couples coordinates, differentiate the shared scale:
+\[
+ \frac{\partial u_i}{\partial x_k}
+ =g_i\left(r\,\delta_{ik}-\frac{x_i x_k}{D}r^3\right).
+\]
+The second term connects every input coordinate to every output coordinate.
+\texttt{gradcheck} perturbs the double-precision input and compares finite
+differences with autograd. This is a test of the implemented local derivative,
+not proof against every floating-point overflow case. Mixed precision and
+stabilized large-magnitude reductions belong to the next milestone.
+
+\section{RoPE and Head Grouping}
+
+For adjacent coordinates \((a,b)\) at position \(p\) and frequency
+\(\omega_j=10000^{-2j/d}\), RoPE applies
+\[
+ \begin{bmatrix}a'\\b'\end{bmatrix}
+ =\begin{bmatrix}\cos(p\omega_j)&-\sin(p\omega_j)\\
+ \sin(p\omega_j)&\cos(p\omega_j)\end{bmatrix}
+ \begin{bmatrix}a\\b\end{bmatrix}.
+\]
+The transform preserves a pair's squared length in exact arithmetic.
+Position zero is the identity. Tests check both properties and the gradient.
+The implementation rotates Q and K, never V. It resets positions to zero for
+each training window; incremental decoding with position offsets is not present.
+
+Q has shape \([B,H_q,T,d]\), while K and V have shape
+\([B,H_{kv},T,d]\) before head expansion. With group size
+\(G=H_q/H_{kv}\), query head \(h\) reads KV head \(\lfloor h/G\rfloor\).
+Our readable implementation physically repeats K/V along the head dimension.
+This makes grouping easy to inspect but is not a memory-optimal kernel.
+
+For one query head, the mathematical attention result is
+\[
+ A=\operatorname{softmax}\!\left(\frac{QK^{\mathsf T}}{\sqrt d}+M\right)V,
+ \qquad
+ M_{t,s}=\begin{cases}0&s\leq t,\\-\infty&s>t.\end{cases}
+\]
+Every row retains its diagonal entry, so no row is fully masked. The score and
+probability matrices explicitly occupy \([B,H_q,T,T]\); this is not
+FlashAttention. An independent test loops over each head and visible position,
+computes dot products and weighted sums, then compares with the vectorized
+implementation. Another changes only future token IDs and demands unchanged
+prefix logits. Neither test can be replaced by a falling loss curve.
+
+\section{SwiGLU and the Objective}
+
+With row-oriented activations and matrices
+\(W_g,W_u\in\mathbb{R}^{D\times F}\),
+\(W_d\in\mathbb{R}^{F\times D}\), the MLP is
+\[
+ \operatorname{MLP}(X)=
+ \bigl(\operatorname{SiLU}(XW_g)\odot XW_u\bigr)W_d,
+ \qquad \operatorname{SiLU}(z)=z\,\sigma(z).
+\]
+PyTorch stores each linear weight as output-by-input, so its physical shapes
+are transposed relative to this equation. Checkpoint conversion must preserve
+that distinction. All three projections are bias-free.
+
+Mean next-token cross entropy is
+\[
+ \mathcal L=-\frac{1}{BT}\sum_{b=1}^{B}\sum_{t=1}^{T}
+ \log\frac{\exp Z_{b,t,y_{b,t}}}{\sum_{v=1}^{V}\exp Z_{b,t,v}}.
+\]
+One whole-model finite-difference test perturbs an output-head parameter and
+checks its loss derivative. It complements operator tests by exercising the
+complete route from token IDs to the scalar objective.
+
+\section{One Optimizer Boundary}
+
+\begin{figure}[htbp]\centering
+\input{figures/step-lifetime}
+\caption{State lifetime is part of correctness. Saved activations, gradients
+and optimizer moments have different owners and release boundaries.}
+\label{fig:step-lifetime}
+\end{figure}
+
+The trainer clears gradients, computes token-weighted microbatch losses,
+backpropagates, rejects nonfinite gradients, clips the total gradient norm to
+one, performs AdamW, and clears gradients again. AdamW decouples weight decay
+from the moment estimates \cite{loshchilov2019adamw}. The pinned reference uses
+\texttt{foreach=False} and decays every parameter, including norm gains. This
+is an explicit teaching policy, not a recommended production hyperparameter recipe.
+
+If microbatch \(i\) contains \(n_i\) targets, accumulate
+\[
+ \mathcal L=\sum_i \frac{n_i}{\sum_j n_j}\mathcal L_i.
+\]
+Dividing each mean loss by the number of microbatches is equivalent only when
+their target counts match. The test deliberately splits a batch into sizes one
+and two. Compare parameter updates within FP32 tolerance, since changing the
+reduction order can change final bits. The optimizer test separately checks
+the first AdamW update against its scalar formula.
+
+\section{Two Sanity Experiments, Different Questions}
+
+First, fit a deterministic repeating eight-character cycle. A large decrease
+in loss shows that the model, backward pass and optimizer are connected. It
+does not establish language generalization: train and evaluation windows share
+the same simple rule, and the model can memorize it.
+
+Second, generate independent uniform token streams. Conditional on any prefix,
+the next token still has probability \(1/V\), so its irreducible expected
+cross entropy is \term{DERIVED}:
+\[
+ H(Y\mid X)=\log V=\log 8\approx2.07944\ \text{nats per token}.
+\]
+Use separate seeded generators for fresh training tokens and held-out evaluation
+tokens. Repeatedly fitting one finite random dataset instead tests memorization.
+The test allows a 0.12-nat interval around entropy after 100 updates and evaluates
+4096 independent target positions. This deterministic regression threshold is
+not a universal statistical confidence interval. A much lower held-out loss
+would be suspicious: inspect target alignment, causal masking and split leakage.
+
+\labtitle{Run, Break, Explain}
+\begin{lstlisting}[language=bash]
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+make check PYTHON=.venv/bin/python
+make smoke PYTHON=.venv/bin/python
+\end{lstlisting}
+
+Remove the causal mask and rerun the future-token test. Change the batch upper
+bound and rerun the final-window test. Replace token-weighted accumulation with
+equal microbatch weighting and observe its regression. Restore each change
+before proceeding. Record the actual command, dependency version, seed, device
+and measured loss; do not copy someone else's output and call it a measurement.
+
+\checkpoint
+\begin{enumerate}
+\item Why can a model memorize random training data but not predict fresh random targets?
+\item Which RMSNorm derivative term couples different coordinates?
+\item Why does repeating KV heads make this reference inefficient but still mathematically useful?
+\item Which test fails if targets are shifted twice? Design an additional direct oracle.
+\item What state survives an optimizer step, and what state may be released?
+\end{enumerate}

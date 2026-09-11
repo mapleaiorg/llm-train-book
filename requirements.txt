@@ -1,0 +1,2 @@
+# CPU reference contract; accelerator behavior is not validated by this pin.
+torch==2.8.0

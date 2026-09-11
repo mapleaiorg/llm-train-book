@@ -273,7 +273,10 @@ weights, such as optimizer state or FP32 tensors.
 
 \section{Case Study: wish01 PyTorch Baseline}
 
-The \texttt{wish01} GPT21 run is an example of realistic small-lab engineering. It used:
+\term{REPORTED historical case study, not reproduced by this repository.}
+The original manuscript describes a \texttt{wish01} GPT21 run with the following
+configuration. Its raw logs, hardware manifest and code revision are not bundled
+here, so the figures below must not be advertised as a verified benchmark:
 
 \begin{itemize}
   \item model shape \(V=32000,T=512,L=6,H=6,C=384\);
@@ -310,8 +313,9 @@ minutes, the approximate throughput is:
 \approx 4414\ \text{tokens/second}.
 \]
 
-This number is not a universal benchmark. It is a local baseline for this exact model,
-data, code, hardware, and configuration.
+This is a \term{DERIVED} ratio of reported totals, conditional on two workers
+actually processing the stated batch. It is not a new measurement or an
+audited baseline. Reproduction requires the missing run manifest and logs.
 
 \section{Memory Levers}
 

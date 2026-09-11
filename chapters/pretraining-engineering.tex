@@ -120,7 +120,7 @@ Training does not usually read raw text directly. It reads token IDs. The pipeli
 \node[box, fill=yellow!18] (clean) at (3,0) {clean +\\deduplicate};
 \node[box, fill=yellow!18] (encode) at (6,0) {encode\\token IDs};
 \node[box, fill=red!8] (stream) at (9,0) {token stream\\\([2,3,4,\ldots]\)};
-\node[box, fill=green!10] (shards) at (12,0) {shards\\\texttt{train\_000.bin}};
+\node[box, fill=green!10] (shards) at (12,0) {shards\\{\footnotesize\texttt{train\_000.bin}}};
 \draw[arrow] (doc1) -- (clean);
 \draw[arrow] (doc2) -- (clean);
 \draw[arrow] (doc3) -- (clean);
@@ -917,7 +917,7 @@ For future backends, this run should become a reference contract:
 \term{Artifact} & \term{PyTorch reference value} & \term{Backend requirement} \\
 \midrule
 Model shape & \(V=32000,T=512,L=6,H=6,C=384\) & Candle and llm.c must instantiate the same architecture before comparing loss. \\
-Data path & \texttt{data/tokens/wikitext103/*.bin} & Token dtype, endianness, and split identity must be documented. \\
+Data path & \path{data/tokens/wikitext103/*.bin} & Token dtype, endianness, and split identity must be documented. \\
 Optimizer step & 2 workers, accumulation 32, block 512 & Effective tokens per step must be reported, not guessed. \\
 Checkpoints & every 500 steps, about 265 MiB each & Save backend name, config hash, tokenizer hash, and step. \\
 Metrics & TensorBoard event file & Also emit JSONL for backend-independent analysis. \\

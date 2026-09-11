@@ -565,7 +565,7 @@ y = y.to(device)
   arrow/.style={-{Latex[length=2mm]}, thick}
 ]
 \node[box, fill=blue!5] (cpu) at (0,0) {CPU tensor\\\texttt{device='cpu'}};
-\node[box, fill=red!8] (gpu) at (4,0) {GPU tensor\\\texttt{device='cuda'}};
+\node[box, fill=red!8, font=\small] (gpu) at (4,0) {GPU tensor\\\texttt{device='cuda'}};
 \node[box, fill=yellow!18] (rule) at (8,0) {operation requires\\compatible devices};
 \draw[arrow] (cpu) -- node[above] {\texttt{.to(device)}} (gpu);
 \draw[arrow] (gpu) -- (rule);

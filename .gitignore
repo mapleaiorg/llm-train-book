@@ -1,4 +1,10 @@
 .DS_Store
+.venv/
+__pycache__/
+*.pyc
+output/
+runs/
+tmp/
 
 # LaTeX build output
 build/

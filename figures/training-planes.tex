@@ -1,0 +1,10 @@
+\begin{tikzpicture}
+\node[engineop,text width=11.8cm] (model) at (0,0) {01 / MODEL SEMANTICS\quad Tokens, causal logits, objective};
+\node[enginevalue,text width=11.8cm] (execute) at (0,-1.65) {02 / EXECUTION\quad Tensors, autograd, optimizer, precision, memory};
+\node[engineop,text width=11.8cm] (distribute) at (0,-3.3) {03 / DISTRIBUTION\quad Ownership, collectives, shards, pipeline schedule};
+\node[enginestate,text width=11.8cm] (operate) at (0,-4.95) {04 / OPERATIONS\quad Data identity, checkpoint, recovery, provenance};
+\draw[enginearrow] (model) -- node[right,enginenote]{realize} (execute);
+\draw[enginearrow] (execute) -- node[right,enginenote]{partition} (distribute);
+\draw[enginearrow] (distribute) -- node[right,enginenote]{recover} (operate);
+\node[enginenote] at (0,-6) {Correctness crosses every plane. This milestone executes planes 1, 2 and local recovery.};
+\end{tikzpicture}

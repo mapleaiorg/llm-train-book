@@ -745,7 +745,7 @@ The LLM ecosystem uses several file conventions:
 \texttt{.pt}/\texttt{.pth} & PyTorch checkpoint & flexible, convenient for training, often contains Python metadata and optimizer state \\
 \texttt{.safetensors} & tensor archive & common for model weights, safer loading model than pickle-style Python objects, needs config/tokenizer beside it \\
 \texttt{*.bin} token files & training data shards & raw token ID arrays; not the same as model weights \\
-\texttt{pytorch\_model.bin} & older Hugging Face weight file naming & name contains \texttt{.bin}, but it is model weights, not token data \\
+\path{pytorch_model.bin} & older Hugging Face weight file naming & name contains \texttt{.bin}, but it is model weights, not token data \\
 custom C binary & systems backend checkpoint & fast and explicit, but project-specific \\
 \texttt{.gguf} & GGML/llama.cpp inference model & self-contained metadata plus tensors, often quantized, good for local inference but not a full training resume checkpoint \\
 other quantized inference formats & deployment & store reduced-precision weights for inference, often not suitable for continued training \\

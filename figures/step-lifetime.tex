@@ -1,0 +1,15 @@
+\begin{tikzpicture}
+\node[enginevalue] (data) at (0,0) {Data batch\\\(x_t,y_t:[B,T]\), int64};
+\node[engineop] (forward) at (4.5,0) {Forward + cross entropy\\scalar mean loss};
+\node[engineop] (back) at (9,0) {Backward\\parameter gradients};
+\node[enginestate] (param) at (0,-2.5) {Persistent model\\\(\theta_t\)};
+\node[enginestate] (opt) at (4.5,-2.5) {Persistent AdamW state\\\(m_t,v_t,\text{step}_t\)};
+\node[engineop] (update) at (9,-2.5) {Clip, step, clear gradients\\\(\theta_{t+1}\)};
+\draw[enginearrow] (data) -- (forward);
+\draw[enginearrow] (forward) -- (back);
+\draw[enginearrow] (param.north east) -- node[above,enginenote]{read weights} (forward.south west);
+\draw[enginearrow] (back) -- (update);
+\draw[enginearrow] (opt) -- (update);
+\draw[enginearrow] (update.south) -- ++(0,-.7) -| node[pos=.25,below,enginenote]{new state for the next optimizer boundary} (param.south);
+\node[enginenote,text width=11cm] at (4.5,-5.1) {Saved activations: forward to backward. Gradients: backward to clear.\\Parameters and moments: across steps. Checkpoint: only after update completes.};
+\end{tikzpicture}

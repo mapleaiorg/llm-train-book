@@ -105,7 +105,7 @@ A model configuration is not paperwork. It defines the size and legal behavior o
 \node[box, fill=red!8] (data) at (3,1.2) {data contract\\\(V,T\)};
 \node[box, fill=red!8] (model) at (3,0) {model size\\\(N,H,C\)};
 \node[box, fill=red!8] (train) at (3,-1.2) {training behavior\\dropout, bias};
-\node[box, fill=green!10] (ckpt) at (6.2,0) {checkpoint\\interpretation};
+\node[box, fill=green!10, font=\small] (ckpt) at (6.2,0) {checkpoint\\interpretation};
 \draw[arrow] (cfg) -- (data);
 \draw[arrow] (cfg) -- (model);
 \draw[arrow] (cfg) -- (train);

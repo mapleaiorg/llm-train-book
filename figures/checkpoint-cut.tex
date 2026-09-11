@@ -1,0 +1,10 @@
+\begin{tikzpicture}
+\node[enginestate,text width=4.6cm] (resume) at (0,0) {RESUME ARTIFACT\\weights, optimizer moments\\step, data identity, RNG\\config, tokenizer identity};
+\node[engineop,text width=4.6cm] (export) at (6.5,0) {DEPLOYMENT EXPORT\\weights, architecture contract\\tokenizer, numerical policy\\conversion checks};
+\node[enginevalue,text width=4.6cm] (train) at (0,-3.2) {Training continuation\\same next batch and update};
+\node[enginevalue,text width=4.6cm] (infer) at (6.5,-3.2) {Inference runtime\\request state, KV memory\\scheduling, output stream};
+\draw[enginearrow] (resume) -- node[above,enginenote]{transform} (export);
+\draw[enginearrow] (resume) -- node[left,enginenote]{restore} (train);
+\draw[enginearrow] (export) -- node[right,enginenote]{load} (infer);
+\node[enginenote,text width=11cm] at (3.25,-5) {The arrow across the boundary is not reversible in general.\\A deployment export does not recover discarded optimizer or data state.};
+\end{tikzpicture}

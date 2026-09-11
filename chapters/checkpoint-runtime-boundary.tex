@@ -1,0 +1,136 @@
+\chapter[The Checkpoint Boundary]{The Checkpoint Boundary: Recover Training, Export Inference}
+\label{ch:checkpoint-boundary}
+
+A file containing model weights is not necessarily a training checkpoint.
+Loading identical weights can reproduce a forward pass while producing a
+different next optimizer update. This chapter makes that distinction executable
+before introducing distributed checkpointing.
+
+\begin{figure}[htbp]\centering
+\input{figures/checkpoint-cut}
+\caption{Training and inference meet at a versioned artifact contract. The
+export path shown is a design boundary; a cross-book converter is not yet implemented.}
+\label{fig:checkpoint-cut}
+\end{figure}
+
+\section{Define the Cut Before Saving the File}
+
+Our supported cut is a completed CPU FP32 optimizer step with gradients cleared.
+There is no dropout, learning-rate scheduler, mixed-precision scaler, data-loader
+worker, distributed rank or in-flight collective. Those omissions make a small
+exact-resume claim possible. Adding any of them requires extending the state
+contract and its test, not merely adding a new command-line flag.
+
+The schema saves model weights, AdamW state, optimizer step, model configuration,
+tokenizer identity, token-stream identity, sampled-batch count, private data RNG
+state and global CPU Torch RNG state. Alphabet order participates in the
+tokenizer hash: two vocabularies with the same size need not give an ID the same
+meaning. Dataset identity includes tokens, context width and vocabulary size.
+The file also records the PyTorch version; loading a different version is rejected.
+
+\section{Why Weights Alone Are Insufficient}
+
+Let \(g_t\) be the current gradient and \(m_t,v_t\) AdamW's moment estimates.
+The next update depends on all three. Restoring only \(\theta_t\) while setting
+\(m_t=v_t=0\) changes the update even if the next batch is identical. Restoring
+moments while sampling a different batch changes \(g_t\). Matching data and
+moments while changing a stochastic operation's random state can also diverge.
+
+The exact-resume test runs four updates, saves, runs four more, then constructs
+a new model and optimizer. It restores the saved state and repeats the same
+four updates. Losses, every parameter, optimizer state, batch count and the next
+global RNG draw must agree exactly on the tested CPU runtime. Construction
+consumes random values, so RNG restoration happens last. This proves a bounded
+local continuation, not cross-device or cross-version reproducibility.
+
+\section{Atomic Visibility Is Not Durability}
+
+The writer serializes into a unique temporary file in the destination directory,
+closes it, then replaces the destination path. Readers on the same filesystem
+see the old file or the new file, not a partially overwritten destination.
+This implementation does not synchronize file and directory metadata to durable
+storage. Power loss, remote object stores, corrupt disks and distributed commit
+protocols remain outside its guarantee.
+
+Only load trusted local checkpoints. The reader uses
+\texttt{torch.load(..., weights\_only=True)}, but a restricted deserializer is
+not a complete security boundary against malformed or resource-exhausting
+artifacts. Identity checks reject wrong tokenizer, data, model configuration,
+schema and runtime. They do not authenticate an attacker-controlled file.
+Checksums, signatures, access control and quota enforcement are future operations work.
+
+\section{A Memory Budget With Units}
+
+For \(P\) FP32 parameters, a simple persistent training-state payload is
+\term{DERIVED}:
+\[
+ M_{\mathrm{persistent}}\approx
+ \underbrace{4P}_{\text{parameters}}+
+ \underbrace{4P}_{\text{gradients}}+
+ \underbrace{8P}_{\text{two Adam moments}}=16P\ \text{bytes}.
+\]
+This counts gradients while they exist. It excludes step tensors, allocator
+rounding, saved activations, optimizer temporaries, token batches and library
+workspaces. After gradients are cleared, the corresponding payload may be
+released, though an allocator may retain reserved memory. The unfused attention
+scores alone require \(4BH_qT^2\) bytes in FP32. Doubling sequence length
+quadruples this particular allocation; it does not prove total memory quadruples.
+
+Mixed-precision policies require a new accounting table: storage dtype,
+compute dtype, accumulation dtype, master parameters, gradients and moments
+must be stated separately. Do not copy a universal bytes-per-parameter number
+into a report without matching the actual implementation.
+
+\section{The Road Toward Distributed Training}
+
+\begin{center}
+\begin{tabular}{p{2.1cm}p{4.3cm}p{6cm}}\toprule
+Method & Partitioned quantity & Correctness gate before performance \\\midrule
+Data parallel & Different examples, replicated model & Match one-process global-batch update \\
+State sharding & Optimizer, gradients or parameters & Gather/reshard and resume equivalence \\
+Tensor parallel & Operator dimensions & Match local operator and required reductions \\
+Pipeline parallel & Layers and microbatch schedule & Correct weight version and gradient schedule \\
+Context parallel & Sequence positions & Global attention and position equivalence \\
+Expert parallel & Experts and routed activations & Routing, capacity and dispatch/combine equivalence \\\bottomrule
+\end{tabular}
+\end{center}
+
+These are planned capabilities, not six implemented backends. Megatron-LM and
+ZeRO are foundational references for partitioning work and persistent state
+\cite{shoeybi2019megatron,rajbhandari2020zero}. The next executable distributed
+gate should be two-process data parallel equivalence on a tiny batch, followed
+by interrupted recovery. Until those tests exist, throughput comparisons across
+multiple devices are premature.
+
+\section{The Companion Book Owns Runtime State}
+
+\emph{Inside the LLM Engine: From model weights and KV memory to industrial
+inference serving} owns the detailed treatment of request admission, paged KV
+memory, continuous batching, prefix-cache identity, speculative scheduling and
+service reliability. This book owns gradients, training data, optimizer state,
+distributed training and post-training objectives. Both must agree about model
+architecture, tensor layout, tokenizer semantics and numerical tolerances.
+
+A future export must record head counts, RoPE pairing convention and base,
+normalization epsilon, vocabulary order, weight tying, linear orientation and
+dtype. Validate selected intermediate tensors and full logits before comparing
+generated text: sampling can hide or amplify small numerical differences.
+GGUF may be a deployment artifact, but it is not the native resume format here.
+Exporting GQA weights is also not proof that an inference engine implements
+the same head grouping.
+
+\labtitle{Recover the Next Update}
+Run \texttt{test\_checkpoint\_exact\_resume\_and\_identity\_rejection}.
+Explain every saved field by removing it in a local experiment. Change the
+alphabet order without changing its size: loading must fail before model state
+is mutated. Try saving after backward but before the update: the writer must
+reject pending gradients. Finally, list the state you would add for a scheduler,
+dropout, mixed-precision scaling and two distributed workers.
+
+\checkpoint
+\begin{enumerate}
+\item What does an atomic rename guarantee, and what does it not guarantee?
+\item Why is a dataset cursor not sufficient for a shuffled or sampled data stream?
+\item Why is equality of generated text a weaker conversion test than a full-logit comparison?
+\item Which additional evidence would justify calling this a distributed, recoverable trainer?
+\end{enumerate}

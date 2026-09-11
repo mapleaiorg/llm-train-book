@@ -499,7 +499,11 @@ This diagram is the visual logic of causal attention. Each head has a table sayi
 
 \section{Preview: Context Vectors As Weighted Sums}
 
-Attention will receive a full chapter later, but the core visual idea is useful now. A context vector is a weighted combination of input vectors. The weights decide how much each earlier token contributes.
+Attention will receive a full chapter later, but the core visual idea is useful now.
+A context vector is a weighted combination of input vectors. This first arithmetic
+example is \emph{unmasked} attention, not TinyGPT's causal forward pass: the second
+position reads future positions too. Causal attention must instead set
+\(\alpha_{23}=\alpha_{24}=0\) and renormalize the allowed weights.
 
 Suppose TinyGPT has four token vectors:
 
@@ -544,9 +548,9 @@ The weights satisfy:
   \node[lab] at (\i*2.15+0.55,-0.25) {\(\alpha_{2\the\numexpr\i+1\relax}=\w\)};
   \draw[arrow] (\i*2.15+0.55,0.25) -- (4.0,-1.25);
 }
-\node[vec, fill=red!10] at (3.45,-1.65) {0.43};
-\node[vec, fill=red!10] at (4.0,-1.65) {0.29};
-\node[vec, fill=red!10] at (4.55,-1.65) {0.29};
+\node[vec, fill=red!10] at (3.45,-1.65) {0.405};
+\node[vec, fill=red!10] at (4.0,-1.65) {0.300};
+\node[vec, fill=red!10] at (4.55,-1.65) {0.305};
 \node[lab] at (4.0,-2.25) {context vector \(z^{(2)}\)};
 \node[lab, text=maplered] at (7.6,-1.25) {The second position reads mostly\\from itself and from \texttt{models}.};
 \end{tikzpicture}

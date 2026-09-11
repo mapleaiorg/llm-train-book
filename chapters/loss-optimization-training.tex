@@ -297,7 +297,7 @@ L \rightarrow W_{\text{out}} \rightarrow X_N \rightarrow \cdots \rightarrow E_{\
   back/.style={{Latex[length=2mm]}-, thick, red!70!black},
   note/.style={font=\small, align=center}
 ]
-\node[box, fill=blue!5] (emb) at (0,0) {embeddings};
+\node[box, fill=blue!5, font=\small] (emb) at (0,0) {embeddings};
 \node[box, fill=red!8] (b1) at (2.2,0) {block 1};
 \node[box, fill=red!8] (b2) at (4.4,0) {block 2};
 \node[box, fill=yellow!18] (ln) at (6.6,0) {final LN};
@@ -487,7 +487,7 @@ B_{\text{effective}}
 \node[box, fill=blue!5] (m1) at (0,0) {microbatch 1\\backward};
 \node[box, fill=blue!5] (m2) at (2.5,0) {microbatch 2\\backward};
 \node[box, fill=blue!5] (m3) at (5.0,0) {microbatch 3\\backward};
-\node[box, fill=yellow!18] (acc) at (7.5,0) {accumulated\\gradients};
+\node[box, fill=yellow!18, font=\small] (acc) at (7.5,0) {accumulated\\gradients};
 \node[box, fill=red!8] (step) at (10.0,0) {one optimizer\\step};
 \draw[arrow] (m1) -- (m2);
 \draw[arrow] (m2) -- (m3);
